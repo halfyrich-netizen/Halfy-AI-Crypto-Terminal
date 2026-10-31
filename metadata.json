@@ -1,0 +1,6 @@
+{
+  "name": "Gigantum AI - Dual Market Stock Intelligence",
+  "description": "24/7 Institutional-grade Crypto Intelligence Terminal dengan Live Binance Price Stream, AI Alpha Radar, On-Chain Whale Tracking, Funding Rate Matrix, dan Deep Gemini AI Token Breakdown.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
