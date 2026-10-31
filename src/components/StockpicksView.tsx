@@ -2,6 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { Stock, MarketType, SignalAction } from '../types/stock';
 import { analyzeWithGemini, computeQuantitativeMathAnalysis, GeminiAnalysisResult } from '../services/api';
 import { Language, translations } from '../utils/translations';
+import { RobotScoutRadar } from './RobotScoutRadar';
 import { 
   ArrowUpRight, 
   SlidersHorizontal, 
@@ -193,79 +194,41 @@ export const StockpicksView: React.FC<StockpicksViewProps> = ({
 
   return (
     <div className="space-y-6">
-      {/* Top Banner & Quantitative Alpha Radar Headline */}
-      <div className="bg-[#0b1322] border border-slate-800 rounded-2xl p-6 shadow-sm">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-5">
-          <div>
-            <div className="flex items-center gap-2.5">
-              <div className="w-9 h-9 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400">
-                <Bot className="w-5 h-5" />
-              </div>
-              <h1 className="text-xl sm:text-2xl font-black text-white font-mono tracking-tight">
-                {isEn ? 'Crypto AI Alpha Picks & Signal Radar' : 'Crypto AI Alpha Picks & Signal Radar'}
-              </h1>
-            </div>
-            <p className="text-xs sm:text-sm text-slate-300 mt-2 max-w-3xl leading-relaxed">
-              {isEn
-                ? '4-Factor Quantitative Model uniting Technical Structure (RSI, MA Ribbon, Support/Resistance), On-Chain Whale Flow (CEX Reserves Outflow), Derivative Metrics (Perpetual Funding Rate 8H & Open Interest), plus Tokenomics & AI Narrative Catalysts.'
-                : 'Model kuantitatif 4-faktor yang menyatukan Struktur Teknikal (RSI, MA Ribbon, Support/Resisten), Flow Akumulasi Paus On-Chain (CEX Reserves Outflow), Metrik Derivatif (Perpetual Funding Rate 8H & Open Interest), serta Tokenomics & Katalis Narasi AI.'}
-            </p>
-          </div>
+      {/* Primary Orange Robot Scout & Quantitative Alpha Radar Mascot */}
+      <RobotScoutRadar stocks={stocks} lang={lang} />
 
-          {/* Quick Metrics Counter */}
-          <div className="flex items-center gap-3 shrink-0">
-            <div className="bg-slate-900 border border-slate-800 rounded-xl px-4 py-2 text-right">
-              <span className="text-[10px] text-slate-400 font-mono block">
-                {isEn ? 'Actively Scanned' : 'Aktif Dipindai'}
-              </span>
-              <span className="text-lg font-black text-white font-mono tabular-nums">
-                {stocks.length} {isEn ? 'Coins' : 'Koin'}
-              </span>
-            </div>
-            <div className="bg-emerald-950/40 border border-emerald-500/30 rounded-xl px-4 py-2 text-right">
-              <span className="text-[10px] text-emerald-300 font-mono block">
-                {isEn ? 'Active Long Signals' : 'Sinyal Long Aktif'}
-              </span>
-              <span className="text-lg font-black text-emerald-400 font-mono tabular-nums">
-                {stocks.filter((s) => s.aiSignal.action === 'Strong Long' || s.aiSignal.action === 'Long (Buy on Dip)').length} {isEn ? 'Setups' : 'Setup'}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {/* Narrative Category Filter Strip */}
-        <div className="mt-5 pt-4 border-t border-slate-800/80 flex flex-wrap items-center gap-3">
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-slate-400 font-mono font-semibold shrink-0 flex items-center gap-1.5 pr-1">
-              <Layers className="w-3.5 h-3.5 text-amber-400" />
-              <span>{isEn ? 'Narrative:' : 'Sektor / Narasi:'}</span>
-            </span>
-            <button
-              onClick={() => setSelectedSector('ALL')}
-              className={`px-3 py-1.5 text-xs font-mono font-semibold rounded-lg transition-colors cursor-pointer ${
-                selectedSector === 'ALL'
-                  ? 'bg-amber-500 text-slate-950 font-bold'
-                  : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
-              }`}
-            >
-              {isEn ? `All Narratives (${stocks.length})` : `Semua Narasi (${stocks.length})`}
-            </button>
-            <select
-              value={selectedSector}
-              onChange={(e) => setSelectedSector(e.target.value)}
-              className="bg-slate-900 border border-slate-800 hover:border-slate-700 text-slate-200 text-xs font-mono py-1.5 px-3 rounded-lg focus:outline-hidden focus:border-amber-500/50 cursor-pointer"
-            >
-              <option value="ALL">{isEn ? '-- Select Specific Sector --' : '-- Pilih Spesifik Sektor --'}</option>
-              {availableSectors.map((sector) => {
-                const count = stocks.filter((s) => s.sector === sector).length;
-                return (
-                  <option key={sector} value={sector}>
-                    {sector} ({count})
-                  </option>
-                );
-              })}
-            </select>
-          </div>
+      {/* Narrative Category Filter Strip */}
+      <div className="bg-[#0b1322] border border-slate-800 rounded-xl px-4 py-3 flex flex-wrap items-center gap-3">
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-slate-400 font-mono font-semibold shrink-0 flex items-center gap-1.5 pr-1">
+            <Layers className="w-3.5 h-3.5 text-orange-400" />
+            <span>{isEn ? 'Narrative:' : 'Sektor / Narasi:'}</span>
+          </span>
+          <button
+            onClick={() => setSelectedSector('ALL')}
+            className={`px-3 py-1.5 text-xs font-mono font-semibold rounded-lg transition-colors cursor-pointer ${
+              selectedSector === 'ALL'
+                ? 'bg-orange-500 text-slate-950 font-bold shadow-[0_0_12px_rgba(249,115,22,0.4)]'
+                : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+            }`}
+          >
+            {isEn ? `All Narratives (${stocks.length})` : `Semua Narasi (${stocks.length})`}
+          </button>
+          <select
+            value={selectedSector}
+            onChange={(e) => setSelectedSector(e.target.value)}
+            className="bg-slate-900 border border-slate-800 hover:border-slate-700 text-slate-200 text-xs font-mono py-1.5 px-3 rounded-lg focus:outline-hidden focus:border-orange-500/50 cursor-pointer"
+          >
+            <option value="ALL">{isEn ? '-- Select Specific Sector --' : '-- Pilih Spesifik Sektor --'}</option>
+            {availableSectors.map((sector) => {
+              const count = stocks.filter((s) => s.sector === sector).length;
+              return (
+                <option key={sector} value={sector}>
+                  {sector} ({count})
+                </option>
+              );
+            })}
+          </select>
         </div>
       </div>
 

@@ -151,3 +151,159 @@
 .animate-robot-glow {
   animation: robot-pulse-glow 2.2s ease-in-out infinite;
 }
+
+/* Orange Robot Scout Animations for Crypto AI Picks & Radar */
+@keyframes robot-scout-patrol {
+  0% {
+    left: 2%;
+    transform: scaleX(1);
+  }
+  44% {
+    left: calc(100% - 150px);
+    transform: scaleX(1);
+  }
+  48% {
+    left: calc(100% - 150px);
+    transform: scaleX(1);
+  }
+  50% {
+    left: calc(100% - 150px);
+    transform: scaleX(-1);
+  }
+  94% {
+    left: 2%;
+    transform: scaleX(-1);
+  }
+  98% {
+    left: 2%;
+    transform: scaleX(-1);
+  }
+  100% {
+    left: 2%;
+    transform: scaleX(1);
+  }
+}
+
+@keyframes robot-scout-patrol-fast {
+  0% {
+    left: 2%;
+    transform: scaleX(1);
+  }
+  44% {
+    left: calc(100% - 150px);
+    transform: scaleX(1);
+  }
+  48% {
+    left: calc(100% - 150px);
+    transform: scaleX(1);
+  }
+  50% {
+    left: calc(100% - 150px);
+    transform: scaleX(-1);
+  }
+  94% {
+    left: 2%;
+    transform: scaleX(-1);
+  }
+  98% {
+    left: 2%;
+    transform: scaleX(-1);
+  }
+  100% {
+    left: 2%;
+    transform: scaleX(1);
+  }
+}
+
+@keyframes robot-scout-bob {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  25% {
+    transform: translateY(-4px) rotate(0.8deg);
+  }
+  50% {
+    transform: translateY(0px);
+  }
+  75% {
+    transform: translateY(-4px) rotate(-0.8deg);
+  }
+}
+
+@keyframes robot-scout-eyes {
+  0%, 100% {
+    transform: translateX(0px);
+  }
+  25% {
+    transform: translateX(-4px) translateY(-1px);
+  }
+  50% {
+    transform: translateX(0px);
+  }
+  75% {
+    transform: translateX(4px) translateY(1px);
+  }
+}
+
+@keyframes robot-radar-cone {
+  0% {
+    transform: rotate(-24deg);
+    opacity: 0.35;
+  }
+  50% {
+    transform: rotate(24deg);
+    opacity: 0.85;
+  }
+  100% {
+    transform: rotate(-24deg);
+    opacity: 0.35;
+  }
+}
+
+@keyframes robot-radar-spin {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes robot-tread-dash {
+  0% {
+    stroke-dashoffset: 0;
+  }
+  100% {
+    stroke-dashoffset: -32;
+  }
+}
+
+.animate-robot-scout-patrol {
+  animation: robot-scout-patrol 10s ease-in-out infinite;
+}
+
+.animate-robot-scout-patrol-fast {
+  animation: robot-scout-patrol-fast 4.5s ease-in-out infinite;
+}
+
+.animate-robot-scout-bob {
+  animation: robot-scout-bob 0.8s ease-in-out infinite;
+}
+
+.animate-robot-scout-eyes {
+  animation: robot-scout-eyes 2.4s ease-in-out infinite;
+}
+
+.animate-robot-radar-cone {
+  transform-origin: 50% 0%;
+  animation: robot-radar-cone 2.2s ease-in-out infinite;
+}
+
+.animate-robot-radar-spin {
+  transform-origin: center;
+  animation: robot-radar-spin 2.6s linear infinite;
+}
+
+.animate-robot-tread {
+  animation: robot-tread-dash 1.2s linear infinite;
+}
