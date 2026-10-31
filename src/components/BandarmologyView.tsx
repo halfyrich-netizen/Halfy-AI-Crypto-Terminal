@@ -62,21 +62,33 @@ export const BandarmologyView: React.FC<BandarmologyViewProps> = ({
             </p>
           </div>
 
-          {/* Asset Selector Pills */}
-          <div className="flex flex-wrap items-center gap-1.5 max-w-xl">
-            {filtered.map((stock) => (
+          {/* Asset Selector */}
+          <div className="flex items-center gap-2 shrink-0">
+            {['BTC', 'ETH', 'SOL', 'TAO'].map((sym) => (
               <button
-                key={stock.symbol}
-                onClick={() => setSelectedStockSymbol(stock.symbol)}
-                className={`px-2.5 py-1 text-xs font-mono font-bold rounded-md transition-all cursor-pointer ${
-                  activeStock?.symbol === stock.symbol
+                key={sym}
+                onClick={() => setSelectedStockSymbol(sym)}
+                className={`px-3 py-1.5 text-xs font-mono font-bold rounded-lg transition-colors cursor-pointer ${
+                  activeStock?.symbol === sym
                     ? 'bg-amber-500 text-slate-950 shadow-sm'
                     : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
                 }`}
               >
-                {stock.symbol}
+                {sym}
               </button>
             ))}
+            <select
+              value={selectedStockSymbol}
+              onChange={(e) => setSelectedStockSymbol(e.target.value)}
+              className="bg-slate-900 border border-slate-800 hover:border-slate-700 text-slate-200 text-xs font-mono py-1.5 px-3 rounded-lg focus:outline-hidden focus:border-amber-500/50 cursor-pointer"
+            >
+              <option value="" disabled>{isEn ? '-- More Coins --' : '-- Koin Lainnya --'}</option>
+              {filtered.map((stock) => (
+                <option key={stock.symbol} value={stock.symbol}>
+                  {stock.symbol} ({stock.name})
+                </option>
+              ))}
+            </select>
           </div>
         </div>
       </div>

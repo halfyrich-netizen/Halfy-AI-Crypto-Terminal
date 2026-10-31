@@ -7,17 +7,17 @@
     -moz-osx-font-smoothing: grayscale;
   }
   body {
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-family: 'Plus Jakarta Sans', 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
     background-color: #080d1a;
     color: #f1f5f9;
     font-size: 14px;
     line-height: 1.6;
     overflow-x: hidden;
-    letter-spacing: -0.011em;
+    letter-spacing: -0.01em;
   }
   h1, h2, h3, h4, h5, h6, button, input, select, textarea {
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    letter-spacing: -0.015em;
+    font-family: 'Plus Jakarta Sans', 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    letter-spacing: -0.01em;
   }
 }
 
@@ -75,4 +75,79 @@
 .animate-ticker:hover,
 .animate-ticker-paused {
   animation-play-state: paused;
+}
+
+/* Animated Trading Robot Mascots */
+@keyframes robot-float {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-6px);
+  }
+}
+
+@keyframes robot-float-fast {
+  0%, 100% {
+    transform: translateY(0px) scale(1.02);
+  }
+  50% {
+    transform: translateY(-8px) scale(1.04);
+  }
+}
+
+@keyframes robot-scanbeam {
+  0% {
+    transform: translateX(-120%);
+    opacity: 0.2;
+  }
+  50% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateX(120%);
+    opacity: 0.2;
+  }
+}
+
+@keyframes robot-radar-expand {
+  0% {
+    transform: scale(0.35);
+    opacity: 0.9;
+  }
+  100% {
+    transform: scale(2.4);
+    opacity: 0;
+  }
+}
+
+@keyframes robot-pulse-glow {
+  0%, 100% {
+    opacity: 0.6;
+    filter: drop-shadow(0 0 5px currentColor);
+  }
+  50% {
+    opacity: 1;
+    filter: drop-shadow(0 0 18px currentColor);
+  }
+}
+
+.animate-robot-float {
+  animation: robot-float 4s ease-in-out infinite;
+}
+
+.animate-robot-float-fast {
+  animation: robot-float-fast 1.6s ease-in-out infinite;
+}
+
+.animate-robot-scanbeam {
+  animation: robot-scanbeam 1.3s ease-in-out infinite;
+}
+
+.animate-robot-radar {
+  animation: robot-radar-expand 1.8s cubic-bezier(0.2, 0.8, 0.4, 1) infinite;
+}
+
+.animate-robot-glow {
+  animation: robot-pulse-glow 2.2s ease-in-out infinite;
 }

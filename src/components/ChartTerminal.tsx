@@ -134,11 +134,12 @@ export const ChartTerminal: React.FC<ChartTerminalProps> = ({
             {stock.symbol}
           </div>
           <div>
-            <div className="flex items-center gap-2.5">
+            <div className="flex items-center gap-2">
               <h2 className="text-xl sm:text-2xl font-bold text-white tracking-tight">{stock.name}</h2>
-              <span className="text-xs text-sky-400 font-mono bg-sky-950/60 px-2 py-0.5 rounded border border-sky-800/60">
+              <span className="text-xs text-slate-400 font-mono">
                 {tvSymbol}
               </span>
+              <span className="text-xs text-slate-500 font-medium">·</span>
               <span className="text-xs text-slate-400 font-medium">
                 {stock.market} · {stock.sector}
               </span>
@@ -156,7 +157,7 @@ export const ChartTerminal: React.FC<ChartTerminalProps> = ({
                 {formatPrice(stock.change).replace('$', '')} ({stock.changePercent.toFixed(2)}%)
               </span>
               <span className="text-xs text-slate-400 font-mono">
-                Rentang 24j: {formatPrice(stock.dayLow)} - {formatPrice(stock.dayHigh)}
+                {isEn ? '24h Range:' : 'Rentang 24j:'} {formatPrice(stock.dayLow)} - {formatPrice(stock.dayHigh)}
               </span>
               <span className="text-xs text-slate-400 font-mono">
                 Vol: ${(stock.volume / 1000000).toFixed(1)}M
@@ -171,44 +172,44 @@ export const ChartTerminal: React.FC<ChartTerminalProps> = ({
           <div className="flex items-center p-1 bg-slate-900 border border-slate-700/90 rounded-lg">
             <button
               onClick={() => setActiveEngine('tradingview')}
-              className={`px-3 py-1.5 text-xs font-semibold rounded-md flex items-center gap-1.5 transition-all whitespace-nowrap ${
+              className={`px-3 py-1.5 text-xs font-semibold rounded-md flex items-center gap-1.5 transition-all whitespace-nowrap cursor-pointer ${
                 activeEngine === 'tradingview'
-                  ? 'bg-sky-500 text-white shadow-sm'
+                  ? 'bg-sky-500 text-slate-950 font-bold shadow-sm'
                   : 'text-slate-400 hover:text-slate-200'
               }`}
             >
-              <Radio className="w-3.5 h-3.5 text-emerald-300" />
-              <span>TradingView Live (Aktual)</span>
+              <Radio className="w-3.5 h-3.5" />
+              <span>{isEn ? 'TradingView Live' : 'TradingView Live (Aktual)'}</span>
             </button>
             <button
               onClick={() => setActiveEngine('heuristic')}
-              className={`px-3 py-1.5 text-xs font-semibold rounded-md flex items-center gap-1.5 transition-all whitespace-nowrap ${
+              className={`px-3 py-1.5 text-xs font-semibold rounded-md flex items-center gap-1.5 transition-all whitespace-nowrap cursor-pointer ${
                 activeEngine === 'heuristic'
-                  ? 'bg-sky-500 text-white shadow-sm'
+                  ? 'bg-sky-500 text-slate-950 font-bold shadow-sm'
                   : 'text-slate-400 hover:text-slate-200'
               }`}
             >
               <BarChart2 className="w-3.5 h-3.5" />
-              <span>Canvas Ringan</span>
+              <span>{isEn ? 'Lightweight Canvas' : 'Canvas Ringan'}</span>
             </button>
           </div>
 
           {onAddToPortfolio && (
             <button
               onClick={() => onAddToPortfolio(stock)}
-              className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg border border-slate-700 transition-colors"
+              className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg border border-slate-700 transition-colors cursor-pointer"
             >
-              + Portofolio
+              + {isEn ? 'Portfolio' : 'Portofolio'}
             </button>
           )}
 
           <button
             onClick={() => handleRunAiAnalysis('math')}
             disabled={analyzingAI}
-            className="px-4 py-2 bg-slate-800 hover:bg-slate-750 text-sky-400 hover:text-sky-300 border border-sky-800/60 text-xs font-semibold rounded-lg flex items-center gap-2 shadow-sm transition-all disabled:opacity-50 cursor-pointer"
+            className="px-4 py-1.5 bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 text-xs font-semibold rounded-lg flex items-center gap-2 transition-colors disabled:opacity-50 cursor-pointer"
           >
             {analyzingAI ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Calculator className="w-3.5 h-3.5 text-amber-400" />}
-            <span>Analisis Model Kuantitatif (Instan)</span>
+            <span>{isEn ? 'Quantitative Model Breakdown' : 'Analisis Model Kuantitatif'}</span>
           </button>
         </div>
       </div>

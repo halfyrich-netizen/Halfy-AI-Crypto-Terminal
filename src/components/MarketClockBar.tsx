@@ -27,8 +27,8 @@ export const MarketClockBar: React.FC<MarketClockBarProps> = ({ lang = 'ID' }) =
 
   const getStatusBadge = (info: MarketTimeInfo) => {
     return (
-      <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded text-[11px] font-mono font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
-        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+      <span className="inline-flex items-center gap-1.5 text-[11px] font-mono text-emerald-400 font-medium">
+        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
         <span>{info.sessionStatus}</span>
       </span>
     );
@@ -41,25 +41,24 @@ export const MarketClockBar: React.FC<MarketClockBarProps> = ({ lang = 'ID' }) =
           {/* Left: 24/7 Global Crypto Clock Strip */}
           <div className="flex flex-wrap items-center gap-4 sm:gap-6 text-xs">
             {/* Live Crypto 24/7 Clock */}
-            <div className="flex items-center gap-3 py-1 px-3 rounded-lg bg-amber-500/10 border border-amber-500/30">
-              <div className="flex items-center gap-1.5">
-                <Zap className="w-3.5 h-3.5 text-amber-400" />
-                <span className="font-bold text-white font-mono tracking-tight text-xs sm:text-sm">
-                  CRYPTO 24/7
-                </span>
-              </div>
+            <div className="flex items-center gap-2.5 py-1 text-slate-200">
+              <span className="font-bold text-amber-400 font-mono tracking-tight text-xs sm:text-sm">
+                CRYPTO 24/7
+              </span>
+              <span className="text-slate-600">·</span>
 
               {/* Digital Clock */}
               <div className="flex items-center gap-1.5 font-mono">
-                <Clock className="w-3.5 h-3.5 text-amber-400" />
-                <span className="text-white font-black text-xs sm:text-sm tracking-wider tabular-nums">
+                <Clock className="w-3.5 h-3.5 text-slate-400" />
+                <span className="text-white font-bold text-xs sm:text-sm tracking-wider tabular-nums">
                   {cryptoTime.timeStr}
                 </span>
-                <span className="text-[10px] text-amber-300 font-bold">{cryptoTime.timeZoneAbbr}</span>
+                <span className="text-[10px] text-slate-400">{cryptoTime.timeZoneAbbr}</span>
               </div>
 
               {/* Status Badge */}
               <div className="hidden md:flex items-center gap-2">
+                <span className="text-slate-600">·</span>
                 {getStatusBadge(cryptoTime)}
               </div>
             </div>

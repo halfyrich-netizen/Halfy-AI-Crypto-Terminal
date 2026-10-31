@@ -90,7 +90,7 @@ export const TickerTape: React.FC<TickerTapeProps> = ({ indices, stocks, onSelec
                 {stock.changePercent.toFixed(2)}%
               </span>
               {stock.aiSignal.action === 'Strong Buy' && (
-                <span className="text-[10px] text-emerald-300 font-mono font-bold bg-emerald-950/90 border border-emerald-600/70 rounded px-1.5 py-0.5 shadow-xs">
+                <span className="text-[10px] text-emerald-400 font-mono font-bold">
                   BUY
                 </span>
               )}
@@ -105,10 +105,7 @@ export const TickerTape: React.FC<TickerTapeProps> = ({ indices, stocks, onSelec
     <div className="relative bg-[#090e1b] border-b border-slate-800/90 py-2.5 px-3 select-none flex items-center shadow-xs overflow-hidden">
       {/* Static Terminal Live Label & Controls */}
       <div className="z-20 shrink-0 flex items-center gap-2 pl-1 pr-3 bg-[#090e1b] border-r border-slate-800">
-        <span className="flex h-2 w-2 relative">
-          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-          <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
-        </span>
+        <span className="w-2 h-2 rounded-full bg-emerald-400" />
         <span className="text-[11px] font-bold font-mono tracking-wider text-slate-300 hidden sm:inline">
           LIVE TICKER
         </span>
@@ -116,28 +113,11 @@ export const TickerTape: React.FC<TickerTapeProps> = ({ indices, stocks, onSelec
         {/* Pause/Play Button */}
         <button
           onClick={() => setIsPaused(!isPaused)}
-          title={isPaused ? 'Lanjutkan running text' : 'Jeda running text'}
-          className="p-1 rounded text-slate-400 hover:text-white hover:bg-slate-800 transition-colors ml-0.5 cursor-pointer"
+          title={isPaused ? (isEn ? 'Resume ticker' : 'Lanjutkan running ticker') : (isEn ? 'Pause ticker' : 'Jeda running ticker')}
+          className="p-1 rounded text-slate-400 hover:text-white transition-colors cursor-pointer"
         >
           {isPaused ? <Play className="w-3 h-3 text-emerald-400" /> : <Pause className="w-3 h-3 text-slate-400" />}
         </button>
-
-        {/* Speed Selector */}
-        <div className="hidden md:flex items-center gap-1 pl-1 border-l border-slate-800/80">
-          <Gauge className="w-3 h-3 text-slate-500" />
-          <select
-            value={tickerSpeed}
-            onChange={(e) => setTickerSpeed(Number(e.target.value))}
-            className="bg-transparent text-[10px] font-mono font-medium text-slate-400 hover:text-slate-200 outline-none cursor-pointer"
-            title="Kecepatan teks berjalan running ticker"
-          >
-            {speedOptions.map((opt) => (
-              <option key={opt.duration} value={opt.duration} className="bg-slate-900 text-white">
-                {opt.label}
-              </option>
-            ))}
-          </select>
-        </div>
       </div>
 
       {/* Left and Right Edge Vignette Shadows */}

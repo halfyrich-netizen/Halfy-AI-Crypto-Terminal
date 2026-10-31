@@ -1,6 +1,6 @@
 {
-  "summary":  "Rancangan arsitektur komprehensif, roadmap pengembangan riset ke MVP, spesifikasi teknis backend dan data engine, serta blueprint UI/UX terminal finansial dual-market IDX & US untuk aplikasi analisis saham, stockpick AI, bandarmologi, notifikasi prediktif, dan manajemen portofolio.",
-  "updatedAt":  "2026-10-29T01:13:01.794561552Z",
+  "summary":  "Implementation plan for integrating real Gemini AI into the AI Autotrade Bot and converting Strategy & Settings into a dedicated overlay modal popup with distinct Pure AI autonomous governance and Hybrid user risk controls.",
+  "updatedAt":  "2026-10-31T13:30:30.726731083Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

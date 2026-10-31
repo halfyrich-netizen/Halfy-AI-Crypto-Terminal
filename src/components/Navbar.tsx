@@ -43,6 +43,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onToggleLanguage,
 }) => {
   const isCryptoActive = currentMarket === 'CRYPTO';
+  const isEn = lang === 'EN';
   const t = translations[lang];
 
   const navItems = [
@@ -58,7 +59,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   return (
     <header className="sticky top-0 z-40 bg-[#090e1a]/95 backdrop-blur-md border-b border-slate-800 px-4 lg:px-6 py-3">
       <div className="flex items-center justify-between gap-6 max-w-[1600px] mx-auto">
-        {/* Zone 1: Brand Wordmark & Far-Left Language Pill */}
+        {/* Zone 1: Brand Wordmark */}
         <div className="flex items-center gap-3 shrink-0">
           <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-amber-500 via-sky-500 to-emerald-400 flex items-center justify-center font-bold text-white shadow-md text-base font-mono">
             ⚡
@@ -71,18 +72,6 @@ export const Navbar: React.FC<NavbarProps> = ({
               24/7 Crypto Intelligence Terminal
             </span>
           </div>
-
-          {/* Far-Left Quick Language Switcher */}
-          {onToggleLanguage && (
-            <button
-              onClick={onToggleLanguage}
-              className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 ml-1 bg-slate-900 hover:bg-slate-800 border border-amber-500/40 hover:border-amber-400 rounded-lg text-xs font-mono font-bold text-amber-300 hover:text-white transition-all cursor-pointer shadow-sm"
-              title={lang === 'ID' ? 'Klik untuk beralih ke English' : 'Click to switch to Bahasa Indonesia'}
-            >
-              <Globe2 className="w-3.5 h-3.5 text-amber-400" />
-              <span>{lang === 'ID' ? '🇮🇩 ID' : '🇬🇧 EN'}</span>
-            </button>
-          )}
         </div>
 
         {/* Zone 2: Navigation Links */}
@@ -93,7 +82,7 @@ export const Navbar: React.FC<NavbarProps> = ({
               <button
                 key={item.id}
                 onClick={() => onTabChange(item.id)}
-                className={`px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-all whitespace-nowrap shrink-0 flex items-center gap-1.5 ${
+                className={`px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-all whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
                   isActive
                     ? 'bg-slate-800 text-amber-400 border border-slate-700 shadow-sm'
                     : 'text-slate-300 hover:text-white hover:bg-slate-800/60'
@@ -110,139 +99,76 @@ export const Navbar: React.FC<NavbarProps> = ({
           })}
         </nav>
 
-        {/* Zone 3: Live Status & Controls */}
-        <div className="flex items-center gap-2.5 shrink-0">
-          {/* 24/7 Binance Live Status Badge — mencerminkan status koneksi nyata */}
-          <div className={`hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg shadow-sm border ${
-            binanceConnected === false
-              ? 'bg-rose-500/10 border-rose-500/30'
-              : 'bg-amber-500/10 border-amber-500/30'
-          }`}>
+        {/* Zone 3: Clean Live Status & Controls */}
+        <div className="flex items-center gap-3 shrink-0">
+          {/* Subtle Live Feed Status Indicator (Not a Button) */}
+          <div className="hidden sm:flex items-center gap-2 px-2.5 py-1 text-xs font-mono text-slate-300">
             <span className="relative flex h-2 w-2">
               <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
-                binanceConnected === false ? 'bg-rose-400' : 'bg-amber-400'
+                binanceConnected === false ? 'bg-rose-400' : 'bg-emerald-400'
               }`} />
               <span className={`relative inline-flex rounded-full h-2 w-2 ${
-                binanceConnected === false ? 'bg-rose-500' : 'bg-amber-500'
+                binanceConnected === false ? 'bg-rose-500' : 'bg-emerald-500'
               }`} />
             </span>
-            <span className={`text-xs font-mono font-bold tracking-tight ${
-              binanceConnected === false ? 'text-rose-300' : 'text-amber-300'
-            }`}>
-              {binanceConnected === false ? 'DATA STALE — TIDAK TERSINKRON' : 'BINANCE 24/7 LIVE'}
+            <span className="text-slate-300 font-medium">
+              {binanceConnected === false ? (isEn ? 'Offline' : 'Offline') : 'Binance 24/7'}
             </span>
+            <span className="text-slate-600">·</span>
+            <span className="text-amber-400 font-bold">Paper</span>
           </div>
 
-          {/* P0.7/P2.3 — badge mode eksplisit: seluruh trading adalah PAPER.
-              Tidak ada endpoint order live; badge kontras tinggi, bukan dot halus. */}
-          <div className="hidden sm:flex items-center px-2.5 py-1.5 bg-white border border-white rounded-lg shadow-sm">
-            <span className="text-xs font-mono font-black tracking-widest text-slate-950">PAPER</span>
-          </div>
-
-          {/* Live Sync Frequency & Refresh Controller */}
-          <div className="hidden sm:flex items-center gap-1.5 bg-slate-900/90 border border-slate-800 px-2.5 py-1 rounded-lg">
-            <div className="flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              <span className="text-[11px] font-mono text-slate-300 font-semibold">
-                Binance/TV:
-              </span>
-            </div>
-            
-            {/* Interval Selector */}
-            <select
-              value={refreshInterval}
-              onChange={(e) => onSetRefreshInterval(Number(e.target.value))}
-              className="bg-transparent text-[11px] font-mono font-bold text-sky-400 border-none outline-none cursor-pointer pr-1"
-              title="Pilih frekuensi auto-update data platform"
-            >
-              <option value={3} className="bg-slate-900 text-white">3s (Turbo)</option>
-              <option value={5} className="bg-slate-900 text-white">5s (Standard)</option>
-              <option value={10} className="bg-slate-900 text-white">10s</option>
-              <option value={30} className="bg-slate-900 text-white">30s</option>
-              <option value={0} className="bg-slate-900 text-white">Manual</option>
-            </select>
-
-            {/* Manual Sync Trigger */}
-            <button
-              onClick={onManualRefresh}
-              disabled={isRefreshing}
-              className="p-1 hover:bg-slate-800 text-slate-400 hover:text-sky-400 rounded transition-colors cursor-pointer disabled:opacity-50"
-              title="Sinkronkan data live Binance & pasar sekarang"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-sky-400' : ''}`} />
-            </button>
-          </div>
+          {/* Single Clean Manual Refresh Button */}
+          <button
+            onClick={onManualRefresh}
+            disabled={isRefreshing}
+            className="p-1.5 hover:bg-slate-800 text-slate-400 hover:text-amber-400 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
+            title={isEn ? 'Sync live Binance quotes now' : 'Sinkronkan data live Binance sekarang'}
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-amber-400' : ''}`} />
+          </button>
 
           {/* Audio Chime Notification Toggle */}
           <button
             onClick={onToggleSound}
-            className={`p-2 rounded-lg border transition-colors cursor-pointer ${
+            className={`p-1.5 rounded-lg border transition-colors cursor-pointer ${
               soundEnabled
-                ? 'bg-slate-800/80 border-slate-700 text-sky-400'
+                ? 'bg-slate-800/80 border-slate-700 text-amber-400'
                 : 'bg-slate-900 border-slate-800 text-slate-500 hover:text-slate-400'
             }`}
-            title={soundEnabled ? 'Matikan audio sinyal lonceng' : 'Nyalakan audio sinyal lonceng'}
+            title={soundEnabled ? (isEn ? 'Mute signal chime' : 'Matikan audio sinyal') : (isEn ? 'Enable signal chime' : 'Nyalakan audio sinyal')}
           >
             {soundEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
           </button>
 
-          {/* Web Push Notification Toggle */}
-          <button
-            onClick={onRequestPush}
-            className={`hidden md:flex p-2 rounded-lg border transition-colors cursor-pointer ${
-              pushEnabled
-                ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-400'
-                : 'bg-slate-900 border-slate-800 text-slate-500 hover:text-slate-400'
-            }`}
-            title={pushEnabled ? 'Notifikasi Web Push aktif' : 'Aktifkan Notifikasi Web Push'}
-          >
-            <ShieldCheck className="w-4 h-4" />
-          </button>
-
-          {/* Alerts Center Tab Shortcut */}
-          <button
-            onClick={() => onTabChange('alerts')}
-            className="relative p-2 bg-slate-900 hover:bg-slate-800 border border-slate-800 rounded-lg text-slate-300 hover:text-white transition-colors cursor-pointer"
-            title="Buka Pusat Alert Sinyal Kuantitatif"
-          >
-            <Bell className="w-4 h-4" />
-            {unreadAlertCount > 0 && (
-              <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-rose-500 text-white text-[10px] font-bold flex items-center justify-center font-mono animate-pulse">
-                {unreadAlertCount}
-              </span>
-            )}
-          </button>
-
-          {/* Prominent Language Switcher (Placed at the ABSOLUTE FAR RIGHT) */}
+          {/* Single Authoritative Language Switcher at Far Right */}
           {onToggleLanguage && (
-            <div className="flex items-center bg-slate-900/95 border-2 border-amber-500/60 hover:border-amber-400 rounded-xl p-1 shadow-lg shadow-amber-500/10 shrink-0">
+            <div className="flex items-center bg-slate-900/95 border border-slate-700 hover:border-amber-500/60 rounded-xl p-0.5 shrink-0 shadow-sm">
               <Globe2 className="w-3.5 h-3.5 text-amber-400 ml-1.5 mr-1 shrink-0" />
-              <div className="flex items-center gap-1">
+              <div className="flex items-center gap-0.5">
                 <button
                   type="button"
                   onClick={() => lang !== 'ID' && onToggleLanguage()}
-                  className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-mono font-bold transition-all cursor-pointer ${
+                  className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-mono font-bold transition-all cursor-pointer ${
                     lang === 'ID'
-                      ? 'bg-amber-400 text-slate-950 font-black shadow-sm ring-1 ring-amber-300'
+                      ? 'bg-amber-400 text-slate-950 font-black shadow-sm'
                       : 'text-slate-400 hover:text-white hover:bg-slate-800'
                   }`}
                   title="Ganti ke Bahasa Indonesia"
                 >
-                  <span className="text-sm">🇮🇩</span>
-                  <span>ID</span>
+                  <span>🇮🇩 ID</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => lang !== 'EN' && onToggleLanguage()}
-                  className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-mono font-bold transition-all cursor-pointer ${
+                  className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-mono font-bold transition-all cursor-pointer ${
                     lang === 'EN'
-                      ? 'bg-amber-400 text-slate-950 font-black shadow-sm ring-1 ring-amber-300'
+                      ? 'bg-amber-400 text-slate-950 font-black shadow-sm'
                       : 'text-slate-400 hover:text-white hover:bg-slate-800'
                   }`}
                   title="Switch to English"
                 >
-                  <span className="text-sm">🇬🇧</span>
-                  <span>EN</span>
+                  <span>🇬🇧 EN</span>
                 </button>
               </div>
             </div>

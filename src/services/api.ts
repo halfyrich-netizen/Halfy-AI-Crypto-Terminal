@@ -286,4 +286,65 @@ export async function calibrateStockPrice(symbol: string, price: number): Promis
   return res.json();
 }
 
+export interface GeminiBotScanTrade {
+  symbol: string;
+  action: 'Strong Long' | 'Long (Buy on Dip)';
+  confidenceScore: number;
+  entryPrice: number;
+  targetPrice: number;
+  stopLoss: number;
+  riskRewardRatio: number;
+  thesis: string;
+  aiReasoning?: string;
+}
+
+export interface GeminiBotScanResponse {
+  success: boolean;
+  engine: 'gemini-3.8-flash' | 'gemini-3.5-flash' | 'quantitative-math' | string;
+  result: {
+    selectedTrades: GeminiBotScanTrade[];
+    marketAnalysis?: string;
+    rejectionSummary?: string;
+  };
+}
+
+export async function executeGeminiBotScan(params: {
+  mode: 'PURE_AI' | 'HYBRID';
+  candidates: Array<{
+    symbol: string;
+    name: string;
+    currentPrice: number;
+    changePercent: number;
+    volume: number;
+    sector: string;
+    rsi14?: number;
+    ma20?: number;
+    support?: number;
+    resistance?: number;
+    fundingRate?: number;
+    whaleStatus?: string;
+    score?: number;
+    targetPrice1?: number;
+    stopLoss?: number;
+  }>;
+  config: {
+    riskPerTradePercent: number;
+    minRiskReward: number;
+    minAiConfidence: number;
+    maxPositions: number;
+    liquidityBalance: number;
+  };
+  marketRegime?: string;
+}): Promise<GeminiBotScanResponse> {
+  const res = await fetch('/api/bot/gemini-scan', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) {
+    throw new Error('Gagal melakukan scan Gemini Autotrade');
+  }
+  return res.json();
+}
+
 

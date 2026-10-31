@@ -298,77 +298,21 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </p>
           </div>
 
-          {/* Real-Time Auto-Update Controls */}
-          <div className="flex flex-wrap items-center gap-3">
-            {/* Live Session Badge */}
-            <div className="bg-slate-900/90 border border-slate-800 px-3.5 py-2 rounded-xl text-xs font-mono shadow-sm">
-              <div className="text-[10px] text-slate-400 uppercase tracking-wider">
-                {isEn ? 'Global Crypto Session & Time' : 'Jam & Sesi Crypto Global'}
-              </div>
-              <div className="text-white font-bold flex items-center gap-1.5 mt-0.5">
-                <Clock className="w-3.5 h-3.5 text-amber-400" />
-                <span className="tabular-nums">{marketTime.timeStr} {marketTime.timeZoneAbbr}</span>
-                <span className="text-[10px] px-1.5 py-0.5 rounded font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/40">
-                  {marketTime.sessionStatus}
-                </span>
-              </div>
-            </div>
-
-            {/* Auto Update Streamer Card */}
-            <div className="bg-slate-900/90 border border-slate-800 px-3.5 py-2 rounded-xl text-xs font-mono shadow-sm flex items-center gap-3">
-              <div>
-                <div className="flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                  <span className="text-[10px] text-slate-400 uppercase tracking-wider">Binance/TV Stream</span>
-                </div>
-                <div className="text-emerald-400 font-bold flex items-center gap-1.5 mt-0.5">
-                  <span>{refreshInterval > 0 ? (isEn ? `Every ${refreshInterval}s` : `Tiap ${refreshInterval}s`) : (isEn ? 'Manual' : 'Manual')}</span>
-                  {refreshInterval > 0 && (
-                    <span className="text-[10px] text-slate-400 font-normal">
-                      (Sync {countdown}s)
-                    </span>
-                  )}
-                </div>
-              </div>
-
-              {/* Speed Controller */}
-              {onSetRefreshInterval && (
-                <div className="border-l border-slate-800 pl-3 flex items-center gap-1">
-                  {[1, 3, 5, 10].map((sec) => (
-                    <button
-                      key={sec}
-                      onClick={() => onSetRefreshInterval(sec)}
-                      className={`px-1.5 py-0.5 text-[10px] rounded font-bold transition-colors cursor-pointer ${
-                        refreshInterval === sec
-                          ? 'bg-amber-500 text-slate-950'
-                          : 'bg-slate-800 text-slate-400 hover:text-white'
-                      }`}
-                      title={isEn ? `Change auto-update to ${sec}s` : `Ubah auto-update ke ${sec} detik`}
-                    >
-                      {sec}s
-                    </button>
-                  ))}
-                  <button
-                    onClick={() => onSetRefreshInterval(0)}
-                    className={`px-1.5 py-0.5 text-[10px] rounded font-bold transition-colors cursor-pointer ${
-                      refreshInterval === 0
-                        ? 'bg-amber-500 text-slate-950'
-                        : 'bg-slate-800 text-slate-400 hover:text-white'
-                    }`}
-                    title={isEn ? 'Pause auto-update' : 'Jeda auto-update otomatis'}
-                  >
-                    Pause
-                  </button>
-                </div>
-              )}
-
-              {/* Manual Trigger */}
+          {/* Stream & Calibration Controls */}
+          <div className="flex flex-wrap items-center gap-2.5">
+            {/* Auto Update Streamer Status */}
+            <div className="bg-slate-900/90 border border-slate-800 px-3 py-1.5 rounded-lg text-xs font-mono shadow-sm flex items-center gap-2 text-slate-300">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 shrink-0" />
+              <span>
+                {isEn ? 'Binance 24/7' : 'Binance 24/7'}
+                {refreshInterval > 0 ? ` (${refreshInterval}s)` : ' (Manual)'}
+              </span>
               {onManualRefresh && (
                 <button
                   onClick={onManualRefresh}
                   disabled={isRefreshing}
-                  className="p-1.5 bg-slate-800 hover:bg-slate-700 text-amber-400 hover:text-amber-300 rounded-lg border border-slate-700 transition-colors cursor-pointer disabled:opacity-50"
-                  title={isEn ? 'Synchronize all market data now' : 'Sinkronkan data seluruh pasar sekarang'}
+                  className="ml-1 p-1 text-slate-400 hover:text-amber-400 transition-colors cursor-pointer disabled:opacity-50"
+                  title={isEn ? 'Synchronize market data now' : 'Sinkronkan data seluruh pasar sekarang'}
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
                 </button>
@@ -382,7 +326,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 setCalibratePrice(btcLivePrice.toString());
                 setShowCalibrateModal(true);
               }}
-              className="bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/40 px-3 py-2 rounded-xl text-xs font-mono font-bold flex items-center gap-1.5 transition-colors cursor-pointer shadow-sm"
+              className="bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer shadow-sm"
               title={isEn ? 'Calibrate price instantly with broker/exchange' : 'Kalibrasi harga seketika dengan broker / exchange'}
             >
               <Zap className="w-3.5 h-3.5 text-amber-400" />
@@ -391,35 +335,20 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
         </div>
 
-        {/* Binance Real-Time Spot Stream Status Ribbon — mencerminkan status koneksi nyata */}
+        {/* Binance Real-Time Spot Stream Status Ribbon */}
         <div className={`mt-4 px-3.5 py-2 rounded-xl border flex flex-wrap items-center justify-between text-xs font-mono gap-2 ${
           binanceConnected === false
             ? 'bg-rose-950/60 border-rose-500/40'
-            : 'bg-slate-900/80 border-emerald-500/30'
+            : 'bg-slate-900/80 border-slate-800'
         }`}>
           <div className="flex items-center gap-2">
-            {binanceConnected === false ? (
-              <>
-                <span className="relative flex h-2.5 w-2.5">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-rose-500"></span>
-                </span>
-                <span className="text-rose-400 font-bold uppercase tracking-wider text-[11px]">
-                  {isEn ? 'Binance Stream: NOT SYNCED — showing static data' : 'Binance Stream: TIDAK TERSINKRON — menampilkan data statis'}
-                </span>
-              </>
-            ) : (
-              <>
-                <span className="relative flex h-2.5 w-2.5">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
-                </span>
-                <span className="text-emerald-400 font-bold uppercase tracking-wider text-[11px]">
-                  {isEn ? 'Binance 24/7 Spot Stream: Connected' : 'Binance 24/7 Spot Stream: Terkoneksi Aktif'}
-                </span>
-              </>
-            )}
-            <span className="text-slate-400 text-[11px] hidden sm:inline">•</span>
+            <span className={`w-2 h-2 rounded-full shrink-0 ${binanceConnected === false ? 'bg-rose-400' : 'bg-emerald-400'}`} />
+            <span className={`font-semibold uppercase tracking-wider text-[11px] ${binanceConnected === false ? 'text-rose-400' : 'text-emerald-400'}`}>
+              {binanceConnected === false
+                ? (isEn ? 'Binance Stream: Not Synced' : 'Binance Stream: Belum Tersinkron')
+                : (isEn ? 'Binance Live Feed' : 'Binance Aliran Langsung')}
+            </span>
+            <span className="text-slate-500 text-[11px] hidden sm:inline">·</span>
             <span className="text-slate-200 text-[11px]">
               BTC/USDT: <strong className="text-amber-400">{formatMoney(btcLivePrice)}</strong>
             </span>
@@ -431,15 +360,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             <span>
               SOL/USDT: <strong className="text-white">{formatMoney(solLivePrice)}</strong>
             </span>
-            {binanceConnected === false ? (
-              <span className="px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-400 border border-rose-500/30 text-[10px] font-bold">
-                {isEn ? 'STALE DATA' : 'DATA STATIS'}
-              </span>
-            ) : (
-              <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 text-[10px] font-bold">
-                LIVE 24H
-              </span>
-            )}
+            <span className={`text-[11px] font-medium ${binanceConnected === false ? 'text-rose-400' : 'text-emerald-400'}`}>
+              {binanceConnected === false ? (isEn ? 'Stale' : 'Statis') : (isEn ? 'Streaming' : 'Streaming')}
+            </span>
           </div>
         </div>
 

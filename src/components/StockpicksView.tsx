@@ -234,37 +234,38 @@ export const StockpicksView: React.FC<StockpicksViewProps> = ({
         </div>
 
         {/* Narrative Category Filter Strip */}
-        <div className="mt-5 pt-4 border-t border-slate-800/80 flex items-center gap-2 overflow-x-auto scrollbar-none pb-1">
-          <span className="text-xs text-slate-400 font-mono font-semibold shrink-0 flex items-center gap-1.5 pr-2">
-            <Layers className="w-3.5 h-3.5 text-amber-400" />
-            <span>{isEn ? 'Sector:' : 'Sektor:'}</span>
-          </span>
-          <button
-            onClick={() => setSelectedSector('ALL')}
-            className={`px-3 py-1 text-xs font-mono font-bold rounded-lg transition-all shrink-0 cursor-pointer ${
-              selectedSector === 'ALL'
-                ? 'bg-amber-500 text-slate-950 shadow-sm'
-                : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
-            }`}
-          >
-            {isEn ? `All Narratives (${stocks.length})` : `Semua Narasi (${stocks.length})`}
-          </button>
-          {availableSectors.map((sector) => {
-            const count = stocks.filter((s) => s.sector === sector).length;
-            return (
-              <button
-                key={sector}
-                onClick={() => setSelectedSector(sector)}
-                className={`px-3 py-1 text-xs font-mono font-semibold rounded-lg transition-all shrink-0 cursor-pointer ${
-                  selectedSector === sector
-                    ? 'bg-amber-500 text-slate-950 shadow-sm'
-                    : 'bg-slate-900 text-slate-300 hover:text-white border border-slate-800'
-                }`}
-              >
-                {sector} ({count})
-              </button>
-            );
-          })}
+        <div className="mt-5 pt-4 border-t border-slate-800/80 flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-slate-400 font-mono font-semibold shrink-0 flex items-center gap-1.5 pr-1">
+              <Layers className="w-3.5 h-3.5 text-amber-400" />
+              <span>{isEn ? 'Narrative:' : 'Sektor / Narasi:'}</span>
+            </span>
+            <button
+              onClick={() => setSelectedSector('ALL')}
+              className={`px-3 py-1.5 text-xs font-mono font-semibold rounded-lg transition-colors cursor-pointer ${
+                selectedSector === 'ALL'
+                  ? 'bg-amber-500 text-slate-950 font-bold'
+                  : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+              }`}
+            >
+              {isEn ? `All Narratives (${stocks.length})` : `Semua Narasi (${stocks.length})`}
+            </button>
+            <select
+              value={selectedSector}
+              onChange={(e) => setSelectedSector(e.target.value)}
+              className="bg-slate-900 border border-slate-800 hover:border-slate-700 text-slate-200 text-xs font-mono py-1.5 px-3 rounded-lg focus:outline-hidden focus:border-amber-500/50 cursor-pointer"
+            >
+              <option value="ALL">{isEn ? '-- Select Specific Sector --' : '-- Pilih Spesifik Sektor --'}</option>
+              {availableSectors.map((sector) => {
+                const count = stocks.filter((s) => s.sector === sector).length;
+                return (
+                  <option key={sector} value={sector}>
+                    {sector} ({count})
+                  </option>
+                );
+              })}
+            </select>
+          </div>
         </div>
       </div>
 
@@ -396,24 +397,30 @@ export const StockpicksView: React.FC<StockpicksViewProps> = ({
                       <div className="flex items-center gap-2">
                         <button
                           onClick={() => onSelectStock(stock.symbol)}
-                          className="font-mono font-black text-white text-lg group-hover:text-amber-400 transition-colors text-left cursor-pointer"
+                          className="font-mono font-bold text-white text-lg hover:text-amber-400 transition-colors text-left cursor-pointer"
                         >
                           {stock.symbol}
                         </button>
-                        <span className="text-[10px] font-mono text-amber-400 bg-amber-950/70 border border-amber-800/60 px-1.5 py-0.2 rounded">
+                        <span className="text-[11px] font-mono text-slate-400">
                           {stock.tvSymbol.replace('BINANCE:', '')}
                         </span>
-                        <span className={`px-2 py-0.5 rounded text-[10px] ${getActionBadge(sig.action)}`}>
-                          {sig.action}
+                        <span className={`text-[11px] font-mono font-bold ${
+                          sig.action.includes('Long') || sig.action.includes('Buy')
+                            ? 'text-emerald-400'
+                            : sig.action.includes('Short') || sig.action.includes('Sell')
+                            ? 'text-rose-400'
+                            : 'text-amber-400'
+                        }`}>
+                          ● {sig.action}
                         </span>
                       </div>
                       <div className="text-xs text-slate-400 mt-0.5 truncate max-w-[210px] font-sans">
-                        {stock.name} · <span className="text-slate-300 font-semibold">{stock.sector}</span>
+                        {stock.name} · <span className="text-slate-300 font-medium">{stock.sector}</span>
                       </div>
                     </div>
 
                     <div className="text-right shrink-0">
-                      <div className="text-base font-black font-mono text-white tabular-nums">
+                      <div className="text-base font-bold font-mono text-white tabular-nums">
                         {formatPrice(stock.currentPrice)}
                       </div>
                       <div
@@ -427,64 +434,64 @@ export const StockpicksView: React.FC<StockpicksViewProps> = ({
                     </div>
                   </div>
 
-                  {/* Quantitative Target Matrix */}
+                  {/* Quantitative Target Matrix (Clean Tabular Layout) */}
                   <div className="grid grid-cols-3 gap-2 mt-4 pt-3 border-t border-slate-800/80 font-mono text-xs">
-                    <div className="bg-slate-900/80 p-2 rounded-lg border border-slate-800/90">
-                      <span className="text-[10px] text-slate-400 block">Entry Zone</span>
-                      <strong className="text-slate-200 text-[11px] truncate block mt-0.5">
+                    <div>
+                      <span className="text-[10px] text-slate-400 block uppercase tracking-wider">Entry</span>
+                      <strong className="text-slate-200 text-xs truncate block mt-0.5">
                         {formatPrice(sig.entryPriceRange[0])}
                       </strong>
                     </div>
 
-                    <div className="bg-slate-900/80 p-2 rounded-lg border border-slate-800/90">
-                      <span className="text-[10px] text-slate-400 block">Target 1</span>
-                      <strong className="text-emerald-400 text-[11px] truncate block mt-0.5">
-                        {formatPrice(sig.targetPrice1)} (+{upsidePct.toFixed(0)}%)
+                    <div>
+                      <span className="text-[10px] text-slate-400 block uppercase tracking-wider">Target 1</span>
+                      <strong className="text-emerald-400 text-xs truncate block mt-0.5">
+                        {formatPrice(sig.targetPrice1)} <span className="text-[10px] text-emerald-500 font-normal">(+{upsidePct.toFixed(0)}%)</span>
                       </strong>
                     </div>
 
-                    <div className="bg-slate-900/80 p-2 rounded-lg border border-slate-800/90">
-                      <span className="text-[10px] text-slate-400 block">Stop Loss</span>
-                      <strong className="text-rose-400 text-[11px] truncate block mt-0.5">
+                    <div>
+                      <span className="text-[10px] text-slate-400 block uppercase tracking-wider">Stop Loss</span>
+                      <strong className="text-rose-400 text-xs truncate block mt-0.5">
                         {formatPrice(sig.stopLoss)}
                       </strong>
                     </div>
                   </div>
 
-                  {/* 4-Pillar Score Bar */}
-                  <div className="mt-3.5 pt-3 border-t border-slate-800/60 grid grid-cols-4 gap-1.5 text-center font-mono">
-                    <div className="bg-slate-900/60 p-1.5 rounded border border-slate-800/70">
-                      <span className="text-[9px] text-slate-400 block">{isEn ? 'Technical' : 'Teknikal'}</span>
-                      <strong className="text-xs text-sky-400">{sig.technicalScore}</strong>
+                  {/* 4-Pillar Score Bar (Clean Tabular Row) */}
+                  <div className="mt-3 pt-2.5 border-t border-slate-800/60 grid grid-cols-4 gap-2 text-center font-mono">
+                    <div>
+                      <span className="text-[10px] text-slate-400 block">{isEn ? 'Technical' : 'Teknikal'}</span>
+                      <strong className="text-xs text-sky-400 tabular-nums">{sig.technicalScore}</strong>
                     </div>
-                    <div className="bg-slate-900/60 p-1.5 rounded border border-slate-800/70">
-                      <span className="text-[9px] text-slate-400 block">On-Chain</span>
-                      <strong className="text-xs text-emerald-400">{sig.bandarScore}</strong>
+                    <div>
+                      <span className="text-[10px] text-slate-400 block">On-Chain</span>
+                      <strong className="text-xs text-emerald-400 tabular-nums">{sig.bandarScore}</strong>
                     </div>
-                    <div className="bg-slate-900/60 p-1.5 rounded border border-slate-800/70">
-                      <span className="text-[9px] text-slate-400 block">{isEn ? 'Funding 8H' : 'Funding'}</span>
-                      <strong className="text-xs text-amber-400">
+                    <div>
+                      <span className="text-[10px] text-slate-400 block">Funding 8H</span>
+                      <strong className="text-xs text-amber-400 tabular-nums">
                         {stock.bandarmology.fundingRate ? `${(stock.bandarmology.fundingRate * 100).toFixed(2)}%` : '0.01%'}
                       </strong>
                     </div>
-                    <div className="bg-slate-900/60 p-1.5 rounded border border-slate-800/70">
-                      <span className="text-[9px] text-slate-400 block">Risk/Reward</span>
-                      <strong className="text-xs text-white">1:{sig.riskRewardRatio}</strong>
+                    <div>
+                      <span className="text-[10px] text-slate-400 block">Risk/Reward</span>
+                      <strong className="text-xs text-slate-200 tabular-nums">1:{sig.riskRewardRatio}</strong>
                     </div>
                   </div>
 
                   {/* Thesis Narrative Box */}
-                  <div className="mt-3 p-2.5 rounded-xl bg-slate-900/60 border border-slate-800 text-[11px] text-slate-300 leading-relaxed font-sans">
+                  <div className="mt-3 p-2.5 rounded-lg bg-slate-900/60 border border-slate-800/80 text-[11px] text-slate-300 leading-relaxed font-sans">
                     {sig.thesis}
                   </div>
                 </div>
 
                 {/* Card Action Strip */}
-                <div className="mt-4 pt-3 border-t border-slate-800/80 flex items-center justify-between gap-2">
+                <div className="mt-4 pt-3 border-t border-slate-800/80 flex items-center justify-between gap-2.5">
                   {/* Deep AI Analysis Button */}
                   <button
                     onClick={() => handleOpenAiDeepDive(stock)}
-                    className="flex-1 py-1.5 px-2.5 bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                    className="flex-1 py-2 px-3 bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
                   >
                     <Sparkles className="w-3.5 h-3.5 text-amber-400" />
                     <span>{isEn ? 'Deep AI Breakdown' : 'Deep AI Breakdown'}</span>
@@ -493,20 +500,11 @@ export const StockpicksView: React.FC<StockpicksViewProps> = ({
                   {/* Add to Portfolio Button */}
                   <button
                     onClick={() => onAddToPortfolio(stock)}
-                    className="py-1.5 px-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer border border-slate-700"
+                    className="py-2 px-3 bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer border border-slate-700"
                     title={isEn ? "+ Open & Record Position in Portfolio" : "+ Ambil & Catat Posisi di Portofolio"}
                   >
                     <PlusCircle className="w-3.5 h-3.5 text-amber-400" />
                     <span>+ {isEn ? 'Position' : 'Posisi'}</span>
-                  </button>
-
-                  {/* Chart Link */}
-                  <button
-                    onClick={() => onSelectStock(stock.symbol)}
-                    className="p-1.5 bg-slate-800 hover:bg-slate-700 text-sky-400 rounded-lg transition-colors cursor-pointer border border-slate-700"
-                    title={isEn ? "Open Binance TradingView Chart" : "Buka Chart TradingView Binance"}
-                  >
-                    <ArrowUpRight className="w-4 h-4" />
                   </button>
                 </div>
               </div>

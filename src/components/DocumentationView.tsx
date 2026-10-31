@@ -31,11 +31,11 @@ export const DocumentationView: React.FC<DocumentationViewProps> = ({ lang = 'ID
         {/* Navigation Tabs */}
         <div className="flex flex-wrap items-center gap-2 mt-5 pt-3 border-t border-slate-800/80">
           {[
-            { id: 'overview', label: '1. Fitur Utama & Benchmarking', icon: Layers },
-            { id: 'roadmap', label: '2. Roadmap Riset s/d MVP', icon: GitBranch },
-            { id: 'architecture', label: '3. Arsitektur Backend & TradingView Feed', icon: Database },
-            { id: 'algorithm', label: '4. Algoritma ML & AI Sentimen', icon: Cpu },
-            { id: 'security', label: '5. Strategi Keamanan Finansial', icon: Shield },
+            { id: 'overview', label: isEn ? '1. Core Features & Benchmarking' : '1. Fitur Utama & Benchmarking', icon: Layers },
+            { id: 'roadmap', label: isEn ? '2. Research Roadmap to MVP' : '2. Roadmap Riset s/d MVP', icon: GitBranch },
+            { id: 'architecture', label: isEn ? '3. Backend & TradingView Architecture' : '3. Arsitektur Backend & TradingView Feed', icon: Database },
+            { id: 'algorithm', label: isEn ? '4. ML Algorithm & AI Sentiment' : '4. Algoritma ML & AI Sentimen', icon: Cpu },
+            { id: 'security', label: isEn ? '5. Financial Security Strategy' : '5. Strategi Keamanan Finansial', icon: Shield },
           ].map((tab) => {
             const Icon = tab.icon;
             const isActive = activeSection === tab.id;

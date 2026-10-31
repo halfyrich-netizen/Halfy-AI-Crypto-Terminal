@@ -17,6 +17,7 @@ import {
   computeOrderSizing,
   makeSetupId,
 } from '../utils/riskEngine';
+import { TradingRobotMascot, RobotTradeEvent } from './TradingRobotMascot';
 
 // ---- Arsip Sesi: snapshot lengkap tiap buku sebelum reset ----
 interface SessionBookSnapshot {
@@ -73,8 +74,10 @@ import {
   Settings,
   Flame,
   Check,
-  Info
+  Info,
+  X
 } from 'lucide-react';
+import { executeGeminiBotScan, GeminiBotScanTrade } from '../services/api';
 
 interface PortfolioViewProps {
   portfolio: PortfolioPosition[];
@@ -213,6 +216,20 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
   // Autopilot 24/7 — waktu scan otomatis terakhir (untuk indikator di header bot)
   const [lastBotScanAt, setLastBotScanAt] = useState<Date | null>(null);
   const botScanRunningRef = useRef(false);
+
+  // Robot Mascot Animation States (Pure AI Hijau & Hybrid Ungu)
+  const [lastBotTradeEvent, setLastBotTradeEvent] = useState<RobotTradeEvent | null>(null);
+  const [isBotTradingActive, setIsBotTradingActive] = useState(false);
+  const botTradingTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  const triggerBotTradingAnimation = (event: RobotTradeEvent) => {
+    setLastBotTradeEvent(event);
+    setIsBotTradingActive(true);
+    if (botTradingTimerRef.current) clearTimeout(botTradingTimerRef.current);
+    botTradingTimerRef.current = setTimeout(() => {
+      setIsBotTradingActive(false);
+    }, 4500);
+  };
 
   // ==========================================
   // HYBRID BOOK — buku portofolio ketiga yang berdiri sendiri
@@ -487,30 +504,56 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
   };
 
   const handleSaveBotSettings = (newConfig: BotConfig) => {
-    setBotConfig(newConfig);
-    try {
-      localStorage.setItem('halfy_bot_config_crypto_v1', JSON.stringify(newConfig));
-    } catch (err) {
-      console.error('Failed to save bot settings', err);
+    if (isHybridMode) {
+      setHybridConfig(newConfig);
+      try {
+        localStorage.setItem('halfy_hybrid_config_crypto_v1', JSON.stringify(newConfig));
+      } catch (err) {
+        console.error('Failed to save hybrid settings', err);
+      }
+      setToastMessage(isEn ? 'Hybrid AI Bot configuration successfully saved!' : 'Konfigurasi Bot Hybrid AI berhasil disimpan!');
+    } else {
+      setBotConfig(newConfig);
+      try {
+        localStorage.setItem('halfy_bot_config_crypto_v1', JSON.stringify(newConfig));
+      } catch (err) {
+        console.error('Failed to save bot settings', err);
+      }
+      setToastMessage(t.settingsSavedToast || (isEn ? 'Pure AI Bot configuration successfully saved!' : 'Konfigurasi Pure AI Bot berhasil disimpan!'));
     }
-    setToastMessage(t.settingsSavedToast || (isEn ? 'Bot configuration successfully saved!' : 'Konfigurasi bot berhasil disimpan!'));
     setTimeout(() => setToastMessage(null), 3500);
   };
 
   const handleRestoreDefaultSettings = () => {
-    setBotConfig((prev) => ({
-      ...INITIAL_BOT_CONFIG,
-      liquidityBalance: prev.liquidityBalance,
-    }));
-    try {
-      localStorage.setItem(
-        'halfy_bot_config_crypto_v1',
-        JSON.stringify({ ...INITIAL_BOT_CONFIG, liquidityBalance: botConfig.liquidityBalance })
-      );
-    } catch (err) {
-      console.error('Failed to save bot defaults', err);
+    if (isHybridMode) {
+      setHybridConfig((prev) => ({
+        ...INITIAL_HYBRID_CONFIG,
+        liquidityBalance: prev.liquidityBalance,
+      }));
+      try {
+        localStorage.setItem(
+          'halfy_hybrid_config_crypto_v1',
+          JSON.stringify({ ...INITIAL_HYBRID_CONFIG, liquidityBalance: hybridConfig.liquidityBalance })
+        );
+      } catch (err) {
+        console.error('Failed to save hybrid defaults', err);
+      }
+      setToastMessage(isEn ? 'Hybrid settings restored to defaults!' : 'Pengaturan Hybrid dikembalikan ke standar!');
+    } else {
+      setBotConfig((prev) => ({
+        ...INITIAL_BOT_CONFIG,
+        liquidityBalance: prev.liquidityBalance,
+      }));
+      try {
+        localStorage.setItem(
+          'halfy_bot_config_crypto_v1',
+          JSON.stringify({ ...INITIAL_BOT_CONFIG, liquidityBalance: botConfig.liquidityBalance })
+        );
+      } catch (err) {
+        console.error('Failed to save bot defaults', err);
+      }
+      setToastMessage(isEn ? 'Pure AI Bot settings restored to quantitative defaults!' : 'Pengaturan bot dikembalikan ke konfigurasi standar!');
     }
-    setToastMessage(isEn ? 'Bot settings restored to quantitative defaults!' : 'Pengaturan bot dikembalikan ke konfigurasi standar!');
     setTimeout(() => setToastMessage(null), 3500);
   };
 
@@ -725,6 +768,14 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
         setRiskState((prev) => ({ ...prev, consecutiveStopped: 0 }));
       }
 
+      // Trigger robot mascot trade execution animation
+      triggerBotTradingAnimation({
+        symbol: positionToClose.symbol,
+        action: closeReason === 'TAKE_PROFIT' ? 'TP' : closeReason === 'STOP_LOSS' ? 'SL' : 'CLOSE',
+        price: exitPrice,
+        timestamp: closeNowMs,
+      });
+
       setBookLogs((prev) => [
         {
           id: `log-${closeNowMs}-${Math.random().toString(36).substring(2, 8)}-${positionToClose.symbol}`,
@@ -758,7 +809,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
   // Masing-masing punya kas, posisi, riwayat, dan konfigurasi sendiri.
   // ==========================================
   type ScanBook = 'bot' | 'hybrid';
-  const runBotScan = (book: ScanBook = 'bot', auto = false) => {
+  const runBotScan = async (book: ScanBook = 'bot', auto = false, isTestScan = false) => {
     const isHybridBook = book === 'hybrid';
     const cfg = isHybridBook ? hybridConfig : botConfig;
     const positions = isHybridBook ? hybridPositions : botPositions;
@@ -791,11 +842,11 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
       && (marketRegime.state === 'TREND_DOWN' || marketRegime.state === 'HIGH_VOLATILITY');
 
     if (botScanRunningRef.current) return; // cegah scan tumpang tindih (manual vs autopilot, bot vs hybrid)
-    if (!cfg.isActive) {
+    if (!cfg.isActive && !isTestScan) {
       setBotScanResultMsg(
         isEn
-          ? `${bookLabel} is PAUSED. Please activate it first.`
-          : `${bookLabel} sedang dijeda (PAUSED). Aktifkan terlebih dahulu.`
+          ? `${bookLabel} is PAUSED. Please activate it first or click "Test Scan with Current Settings".`
+          : `${bookLabel} sedang dijeda (PAUSED). Aktifkan terlebih dahulu atau klik "Uji Scan dengan Pengaturan Ini".`
       );
       return;
     }
@@ -804,189 +855,395 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
     setIsBotScanning(true);
     if (!auto) setBotScanResultMsg('');
 
-    setTimeout(() => {
-      let currentLiquidity = cfg.liquidityBalance;
-      const currentPositions = [...positions];
-      const newLogs: BotExecutionLog[] = [];
-      let openedCount = 0;
+    await new Promise((resolve) => setTimeout(resolve, 300));
 
-      // 1. Monitor existing positions for Take Profit / Stop Loss with live Binance prices
-      // P0.2/T14 — karantina posisi dengan geometri stop/target rusak:
-      // LONG initial stop harus < averageEntry (mis. TAO SL 460 vs entry 234).
-      // Stop rusak TIDAK di-trigger sebagai SL dan TIDAK dikoreksi otomatis —
-      // posisi dikarantina + di-alert, ditutup manual oleh user.
-      const quarantinedSymbols = new Set<string>();
-      const updatedPositions: PortfolioPosition[] = [];
-      for (const pos of currentPositions) {
-        const live = stocks.find((s) => s.symbol === pos.symbol);
-        const livePrice = live ? live.currentPrice : pos.currentPrice;
+    let currentLiquidity = cfg.liquidityBalance;
+    const currentPositions = [...positions];
+    const newLogs: BotExecutionLog[] = [];
+    let openedCount = 0;
 
-        const invalidInitialStop = pos.stopLoss != null && pos.stopLoss >= pos.averageBuyPrice; // LONG
-        const invalidTarget = pos.targetPrice != null && pos.targetPrice <= pos.averageBuyPrice; // LONG
+    // 1. Monitor existing positions for Take Profit / Stop Loss with live Binance prices
+    const quarantinedSymbols = new Set<string>();
+    const updatedPositions: PortfolioPosition[] = [];
+    for (const pos of currentPositions) {
+      const live = stocks.find((s) => s.symbol === pos.symbol);
+      const livePrice = live ? live.currentPrice : pos.currentPrice;
 
-        if (pos.targetPrice && !invalidTarget && livePrice >= pos.targetPrice) {
-          // AUTO TAKE PROFIT TRIGGERED
-          const closeVal = Math.round(pos.sharesTotal * livePrice * 100) / 100;
-          const pnl = Math.round((closeVal - pos.totalCost) * 100) / 100;
-          const pnlPct = Math.round((pnl / pos.totalCost) * 10000) / 100;
+      const invalidInitialStop = pos.stopLoss != null && pos.stopLoss >= pos.averageBuyPrice; // LONG
+      const invalidTarget = pos.targetPrice != null && pos.targetPrice <= pos.averageBuyPrice; // LONG
 
-          currentLiquidity += closeVal;
-          setClosed((prev) => [
-            {
-              id: `${idPrefix}-closed-${Date.now()}-${Math.random().toString(36).substring(2, 8)}-${pos.symbol}`,
-              symbol: pos.symbol,
-              name: pos.name,
-              market: pos.market,
-              quantity: pos.quantity,
-              averageBuyPrice: pos.averageBuyPrice,
-              closePrice: livePrice,
-              totalCost: pos.totalCost,
-              closeValue: closeVal,
-              realizedPnL: pnl,
-              realizedPnLPercent: pnlPct,
-              dateAdded: pos.dateAdded,
-              dateClosed: new Date().toISOString(),
-              closeReason: 'TAKE_PROFIT',
-              notes: isEn ? `Auto TP1 triggered at $${livePrice} (+${pnlPct}%)` : `Auto TP1 terpicu di $${livePrice} (+${pnlPct}%)`,
-              executedBy: isHybridBook ? 'HYBRID' : 'AI_BOT',
-            },
-            ...prev,
-          ]);
+      if (pos.targetPrice && !invalidTarget && livePrice >= pos.targetPrice) {
+        // AUTO TAKE PROFIT TRIGGERED
+        const closeVal = Math.round(pos.sharesTotal * livePrice * 100) / 100;
+        const pnl = Math.round((closeVal - pos.totalCost) * 100) / 100;
+        const pnlPct = Math.round((pnl / pos.totalCost) * 10000) / 100;
 
-          // P0.6 — TP meng-reset hitungan stop-loss beruntun
-          setRiskState((prev) => ({ ...prev, consecutiveStopped: 0 }));
-
-          newLogs.push({
-            id: `log-${nowMs}-${Math.random().toString(36).substring(2, 8)}-${pos.symbol}`,
-            timestamp: nowIso,
-            action: 'TAKE_PROFIT',
+        currentLiquidity += closeVal;
+        setClosed((prev) => [
+          {
+            id: `${idPrefix}-closed-${Date.now()}-${Math.random().toString(36).substring(2, 8)}-${pos.symbol}`,
             symbol: pos.symbol,
-            price: livePrice,
-            pnl,
-            details: isEn
-              ? `[AUTO-TP] Target TP1 reached for ${pos.symbol} @ $${livePrice}. Realized P&L: +$${pnl.toLocaleString()} (+${pnlPct}%). Returned to ${cashLabel}: +$${closeVal.toLocaleString()} USDT.`
-              : `[AUTO-TP] Target TP1 tercapai untuk ${pos.symbol} @ $${livePrice}. Realisasi P&L: +$${pnl.toLocaleString()} (+${pnlPct}%). Dikembalikan ke ${cashLabel}: +$${closeVal.toLocaleString()} USDT.`,
-          });
-        } else if (pos.stopLoss && !invalidInitialStop && isStopTriggered('LONG', livePrice, pos.stopLoss)) {
-          // AUTO STOP LOSS TRIGGERED
-          const closeVal = Math.round(pos.sharesTotal * livePrice * 100) / 100;
-          const pnl = Math.round((closeVal - pos.totalCost) * 100) / 100;
-          const pnlPct = Math.round((pnl / pos.totalCost) * 10000) / 100;
+            name: pos.name,
+            market: pos.market,
+            quantity: pos.quantity,
+            averageBuyPrice: pos.averageBuyPrice,
+            closePrice: livePrice,
+            totalCost: pos.totalCost,
+            closeValue: closeVal,
+            realizedPnL: pnl,
+            realizedPnLPercent: pnlPct,
+            dateAdded: pos.dateAdded,
+            dateClosed: new Date().toISOString(),
+            closeReason: 'TAKE_PROFIT',
+            notes: isEn ? `Auto TP1 triggered at $${livePrice} (+${pnlPct}%)` : `Auto TP1 terpicu di $${livePrice} (+${pnlPct}%)`,
+            executedBy: isHybridBook ? 'HYBRID' : 'AI_BOT',
+          },
+          ...prev,
+        ]);
 
-          currentLiquidity += closeVal;
-          setClosed((prev) => [
-            {
-              id: `${idPrefix}-closed-${Date.now()}-${Math.random().toString(36).substring(2, 8)}-${pos.symbol}`,
-              symbol: pos.symbol,
-              name: pos.name,
-              market: pos.market,
-              quantity: pos.quantity,
-              averageBuyPrice: pos.averageBuyPrice,
-              closePrice: livePrice,
-              totalCost: pos.totalCost,
-              closeValue: closeVal,
-              realizedPnL: pnl,
-              realizedPnLPercent: pnlPct,
-              dateAdded: pos.dateAdded,
-              dateClosed: new Date().toISOString(),
-              closeReason: 'STOP_LOSS',
-              notes: isEn ? `Stop loss discipline protection at $${livePrice} (${pnlPct}%)` : `Disiplin proteksi stop loss di $${livePrice} (${pnlPct}%)`,
-              executedBy: isHybridBook ? 'HYBRID' : 'AI_BOT',
-            },
-            ...prev,
-          ]);
+        // TP meng-reset hitungan stop-loss beruntun
+        setRiskState((prev) => ({ ...prev, consecutiveStopped: 0 }));
+        triggerBotTradingAnimation({
+          symbol: pos.symbol,
+          action: 'TP',
+          price: livePrice,
+          timestamp: nowMs,
+        });
 
-          // P0.4/P0.6 — SL memicu cooldown per simbol (30 menit) + hitung stop beruntun
-          setRiskState((prev) => ({
-            cooldowns: { ...prev.cooldowns, [pos.symbol]: nowMs + 30 * 60 * 1000 },
-            consecutiveStopped: prev.consecutiveStopped + 1,
-          }));
+        newLogs.push({
+          id: `log-${nowMs}-${Math.random().toString(36).substring(2, 8)}-${pos.symbol}`,
+          timestamp: nowIso,
+          action: 'TAKE_PROFIT',
+          symbol: pos.symbol,
+          price: livePrice,
+          pnl,
+          details: isEn
+            ? `[AUTO-TP] Target TP1 reached for ${pos.symbol} @ $${livePrice}. Realized P&L: +$${pnl.toLocaleString()} (+${pnlPct}%). Returned to ${cashLabel}: +$${closeVal.toLocaleString()} USDT.`
+            : `[AUTO-TP] Target TP1 tercapai untuk ${pos.symbol} @ $${livePrice}. Realisasi P&L: +$${pnl.toLocaleString()} (+${pnlPct}%). Dikembalikan ke ${cashLabel}: +$${closeVal.toLocaleString()} USDT.`,
+        });
+      } else if (pos.stopLoss && !invalidInitialStop && isStopTriggered('LONG', livePrice, pos.stopLoss)) {
+        // AUTO STOP LOSS TRIGGERED
+        const closeVal = Math.round(pos.sharesTotal * livePrice * 100) / 100;
+        const pnl = Math.round((closeVal - pos.totalCost) * 100) / 100;
+        const pnlPct = Math.round((pnl / pos.totalCost) * 10000) / 100;
 
-          newLogs.push({
-            id: `log-${nowMs}-${Math.random().toString(36).substring(2, 8)}-${pos.symbol}`,
-            timestamp: nowIso,
-            action: 'STOP_LOSS',
+        currentLiquidity += closeVal;
+        setClosed((prev) => [
+          {
+            id: `${idPrefix}-closed-${Date.now()}-${Math.random().toString(36).substring(2, 8)}-${pos.symbol}`,
             symbol: pos.symbol,
-            price: livePrice,
-            pnl,
-            details: isEn
-              ? `[AUTO-SL] Stop Loss triggered for ${pos.symbol} @ $${livePrice}. Capital protection realized: $${pnl.toLocaleString()} (${pnlPct}%). Cooldown 30m active for this symbol.`
-              : `[AUTO-SL] Stop Loss terpicu untuk ${pos.symbol} @ $${livePrice}. Proteksi modal terealisasi: $${pnl.toLocaleString()} (${pnlPct}%). Cooldown 30m aktif untuk simbol ini.`,
+            name: pos.name,
+            market: pos.market,
+            quantity: pos.quantity,
+            averageBuyPrice: pos.averageBuyPrice,
+            closePrice: livePrice,
+            totalCost: pos.totalCost,
+            closeValue: closeVal,
+            realizedPnL: pnl,
+            realizedPnLPercent: pnlPct,
+            dateAdded: pos.dateAdded,
+            dateClosed: new Date().toISOString(),
+            closeReason: 'STOP_LOSS',
+            notes: isEn ? `Stop loss discipline protection at $${livePrice} (${pnlPct}%)` : `Disiplin proteksi stop loss di $${livePrice} (${pnlPct}%)`,
+            executedBy: isHybridBook ? 'HYBRID' : 'AI_BOT',
+          },
+          ...prev,
+        ]);
+
+        // SL memicu cooldown per simbol (30 menit) + hitung stop beruntun
+        setRiskState((prev) => ({
+          cooldowns: { ...prev.cooldowns, [pos.symbol]: nowMs + 30 * 60 * 1000 },
+          consecutiveStopped: prev.consecutiveStopped + 1,
+        }));
+        triggerBotTradingAnimation({
+          symbol: pos.symbol,
+          action: 'SL',
+          price: livePrice,
+          timestamp: nowMs,
+        });
+
+        newLogs.push({
+          id: `log-${nowMs}-${Math.random().toString(36).substring(2, 8)}-${pos.symbol}`,
+          timestamp: nowIso,
+          action: 'STOP_LOSS',
+          symbol: pos.symbol,
+          price: livePrice,
+          pnl,
+          details: isEn
+            ? `[AUTO-SL] Stop Loss triggered for ${pos.symbol} @ $${livePrice}. Capital protection realized: $${pnl.toLocaleString()} (${pnlPct}%). Cooldown 30m active for this symbol.`
+            : `[AUTO-SL] Stop Loss terpicu untuk ${pos.symbol} @ $${livePrice}. Proteksi modal terealisasi: $${pnl.toLocaleString()} (${pnlPct}%). Cooldown 30m aktif untuk simbol ini.`,
+        });
+      } else {
+        // Keep active position updated with live Binance price
+        const updatedVal = Math.round(pos.sharesTotal * livePrice * 100) / 100;
+        const updatedPnl = Math.round((updatedVal - pos.totalCost) * 100) / 100;
+        const updatedPct = pos.totalCost > 0 ? Math.round((updatedPnl / pos.totalCost) * 10000) / 100 : 0;
+        updatedPositions.push({
+          ...pos,
+          currentPrice: livePrice,
+          currentValue: updatedVal,
+          unrealizedPnL: updatedPnl,
+          unrealizedPnLPercent: updatedPct,
+        });
+        if (invalidInitialStop || invalidTarget) {
+          quarantinedSymbols.add(pos.symbol);
+        }
+      }
+    }
+
+    // Alert karantina sekali per simbol per scan
+    for (const sym of quarantinedSymbols) {
+      newLogs.push({
+        id: `log-${nowMs}-quarantine-${sym}`,
+        timestamp: nowIso,
+        action: 'SIGNAL_SKIPPED',
+        symbol: sym,
+        price: stocks.find((s) => s.symbol === sym)?.currentPrice ?? 0,
+        details: isEn
+          ? `[RISK] Position ${sym} QUARANTINED: corrupted stop/target geometry (initial stop >= entry for LONG). Auto stop-loss DISABLED pending review — close manually or fix the signal source.`
+          : `[RISK] Posisi ${sym} DIKARANTINA: geometri stop/target rusak (initial stop >= entry untuk LONG). Auto stop-loss DINONAKTIFKAN menunggu tinjauan — tutup manual atau perbaiki sumber sinyal.`,
+      });
+    }
+
+    // 2. Scan AI Signals for New Entries with Strict Strategy Gating & Kelly Sizing
+    const botEquity = currentLiquidity + updatedPositions.reduce((sum, p) => sum + p.currentValue, 0);
+    const availableSlots = Math.max(0, cfg.maxConcurrentPositions - updatedPositions.length);
+
+    // Circuit breakers dievaluasi sebelum entry apa pun (fail-closed)
+    const dailyRealizedPnl = bookClosedList
+      .filter((c) => (c.dateClosed || '').slice(0, 10) === nowIso.slice(0, 10))
+      .reduce((acc, c) => acc + c.realizedPnL, 0);
+    const riskEval = evaluateRiskEngine({
+      equity: botEquity,
+      openPositions: updatedPositions.map((p) => ({
+        symbol: p.symbol,
+        side: 'LONG' as const,
+        initialRiskUsd: p.stopLoss != null
+          ? p.sharesTotal * Math.abs(p.averageBuyPrice - p.stopLoss)
+          : p.totalCost * 0.02,
+        notional: p.currentValue,
+      })),
+      dailyRealizedPnl,
+      consecutiveStoppedTrades: riskState.consecutiveStopped,
+      cooldowns: riskState.cooldowns,
+      now: nowMs,
+      lastQuoteAgeMs: quoteAgeMs,
+      mode: 'PAPER',
+      killSwitch: cfg.entriesPaused ? 'PAUSE_ENTRIES' : 'NONE',
+      config: RISK_CONFIG,
+    });
+
+    const evaluatedReportCandidates: NonNullable<typeof scanAuditReport>['topCandidates'] = [];
+    const sortedStocks = [...stocks].sort((a, b) => b.aiSignal.confidenceScore - a.aiSignal.confidenceScore);
+    let slotsRemaining = availableSlots;
+
+    const regimeNote = regimeBlocksLong
+      ? ` [REGIME ${marketRegime!.state}: ${marketRegime!.reasons[0] || 'pasar tidak mendukung LONG baru'}]`
+      : marketRegime ? ` [REGIME ${marketRegime.state}]` : '';
+
+    let geminiEngineUsed: string = 'quantitative-math';
+    let geminiMarketAnalysis: string | undefined;
+    let geminiTrades: GeminiBotScanTrade[] = [];
+
+    // REAL GEMINI AI MULTI-FACTOR ENGINE EXECUTION
+    if (riskEval.canEnter && !regimeBlocksLong && slotsRemaining > 0) {
+      try {
+        const candidateSlice = sortedStocks.slice(0, 10).map((c) => ({
+          symbol: c.symbol,
+          name: c.name,
+          currentPrice: c.currentPrice,
+          changePercent: c.changePercent,
+          volume: c.volume,
+          sector: c.sector,
+          rsi14: c.technicals?.rsi14,
+          ma20: c.technicals?.ma20,
+          support: c.technicals?.supportLevel,
+          resistance: c.technicals?.resistanceLevel,
+          fundingRate: c.bandarmology?.fundingRate,
+          whaleStatus: c.bandarmology?.accumulationStatus,
+          score: c.aiSignal.confidenceScore,
+          targetPrice1: c.aiSignal.targetPrice1,
+          stopLoss: c.aiSignal.stopLoss,
+        }));
+
+        const scanRes = await executeGeminiBotScan({
+          mode: isHybridBook ? 'HYBRID' : 'PURE_AI',
+          candidates: candidateSlice,
+          config: {
+            riskPerTradePercent: cfg.riskPerTradePercent,
+            minRiskReward: cfg.minRiskReward,
+            minAiConfidence: cfg.minAiConfidence,
+            maxPositions: cfg.maxConcurrentPositions,
+            liquidityBalance: currentLiquidity,
+          },
+          marketRegime: marketRegime?.state,
+        });
+
+        if (scanRes && scanRes.result && Array.isArray(scanRes.result.selectedTrades)) {
+          geminiTrades = scanRes.result.selectedTrades;
+          geminiEngineUsed = scanRes.engine;
+          geminiMarketAnalysis = scanRes.result.marketAnalysis;
+        }
+      } catch (err) {
+        console.warn('[GeminiBotScan] API fallback triggered:', err);
+      }
+
+      // 2A. Process Gemini-selected high-conviction trades first
+      if (geminiTrades.length > 0) {
+        for (const gTrade of geminiTrades) {
+          if (slotsRemaining <= 0) break;
+          const candidate = sortedStocks.find((s) => s.symbol === gTrade.symbol) || {
+            symbol: gTrade.symbol,
+            name: gTrade.symbol,
+            currentPrice: gTrade.entryPrice,
+            changePercent: 0,
+            aiSignal: {
+              action: gTrade.action,
+              confidenceScore: gTrade.confidenceScore,
+              riskRewardRatio: gTrade.riskRewardRatio,
+              targetPrice1: gTrade.targetPrice,
+              stopLoss: gTrade.stopLoss,
+              thesis: gTrade.thesis,
+            }
+          };
+
+          const isAlreadyActive = updatedPositions.some((p) => p.symbol === gTrade.symbol);
+          if (isAlreadyActive) {
+            evaluatedReportCandidates.push({
+              symbol: gTrade.symbol,
+              name: candidate.name,
+              price: gTrade.entryPrice,
+              action: gTrade.action,
+              confidence: gTrade.confidenceScore,
+              riskReward: gTrade.riskRewardRatio,
+              status: 'DISCIPLINE_HOLD',
+              disqualificationReason: isEn ? 'Already holding active position' : 'Posisi aktif sudah ada',
+              thesis: gTrade.thesis,
+            });
+            continue;
+          }
+
+          if (isSymbolInCooldown(gTrade.symbol, riskState.cooldowns, nowMs)) {
+            evaluatedReportCandidates.push({
+              symbol: gTrade.symbol,
+              name: candidate.name,
+              price: gTrade.entryPrice,
+              action: gTrade.action,
+              confidence: gTrade.confidenceScore,
+              riskReward: gTrade.riskRewardRatio,
+              status: 'DISCIPLINE_HOLD',
+              disqualificationReason: `REJECTED_COOLDOWN: Cooldown active until ${new Date(riskState.cooldowns[gTrade.symbol]).toLocaleTimeString()}`,
+              thesis: gTrade.thesis,
+            });
+            continue;
+          }
+
+          const geo = validateInitialGeometry({
+            side: 'LONG',
+            entry: gTrade.entryPrice,
+            initialStop: gTrade.stopLoss,
+            targets: [gTrade.targetPrice],
           });
-        } else {
-          // Keep active position updated with live Binance price
-          const updatedVal = Math.round(pos.sharesTotal * livePrice * 100) / 100;
-          const updatedPnl = Math.round((updatedVal - pos.totalCost) * 100) / 100;
-          const updatedPct = pos.totalCost > 0 ? Math.round((updatedPnl / pos.totalCost) * 10000) / 100 : 0;
-          updatedPositions.push({
-            ...pos,
-            currentPrice: livePrice,
-            currentValue: updatedVal,
-            unrealizedPnL: updatedPnl,
-            unrealizedPnLPercent: updatedPct,
+
+          if (!geo.valid) {
+            evaluatedReportCandidates.push({
+              symbol: gTrade.symbol,
+              name: candidate.name,
+              price: gTrade.entryPrice,
+              action: gTrade.action,
+              confidence: gTrade.confidenceScore,
+              riskReward: gTrade.riskRewardRatio,
+              status: 'DISQUALIFIED',
+              disqualificationReason: `${geo.reasonCode}: ${geo.detail}`,
+              thesis: gTrade.thesis,
+            });
+            continue;
+          }
+
+          const multiplier = isHybridBook ? (cfg.hybridRiskMultiplier || 1.0) : 1.0;
+          const sizing = computeOrderSizing({
+            side: 'LONG',
+            entry: gTrade.entryPrice,
+            initialStop: gTrade.stopLoss,
+            target: gTrade.targetPrice,
+            equity: botEquity,
+            riskFraction: Math.min((cfg.riskPerTradePercent / 100) * multiplier, RISK_CONFIG.perTradeRiskPct / 100),
+            availableCash: currentLiquidity,
+            minNotional: 10,
+            maxNotional: currentLiquidity,
           });
-          if (invalidInitialStop || invalidTarget) {
-            quarantinedSymbols.add(pos.symbol);
+
+          if (sizing.valid && sizing.quantity > 0) {
+            currentLiquidity -= sizing.notional;
+            slotsRemaining--;
+            openedCount++;
+
+            const newPos: PortfolioPosition = {
+              id: `${idPrefix}-pos-${Date.now()}-${gTrade.symbol}`,
+              symbol: gTrade.symbol,
+              name: candidate.name,
+              market: 'CRYPTO',
+              quantity: sizing.quantity,
+              sharesTotal: sizing.quantity,
+              averageBuyPrice: gTrade.entryPrice,
+              currentPrice: gTrade.entryPrice,
+              totalCost: sizing.notional,
+              currentValue: sizing.notional,
+              unrealizedPnL: 0,
+              unrealizedPnLPercent: 0,
+              targetPrice: gTrade.targetPrice,
+              stopLoss: gTrade.stopLoss,
+              dateAdded: new Date().toISOString().split('T')[0],
+              executedArchetype: isHybridBook ? 'HYBRID' : 'AI_AUTONOMOUS',
+              setupId: makeSetupId(gTrade.symbol, isHybridBook ? 'HYBRID' : (geminiEngineUsed === 'gemini-3.8-flash' ? 'GEMINI' : 'PURE_AI'), nowMs),
+            };
+
+            updatedPositions.push(newPos);
+
+            evaluatedReportCandidates.push({
+              symbol: gTrade.symbol,
+              name: candidate.name,
+              price: gTrade.entryPrice,
+              action: gTrade.action,
+              confidence: gTrade.confidenceScore,
+              riskReward: gTrade.riskRewardRatio,
+              status: 'EXECUTED',
+              sizing: {
+                units: sizing.quantity,
+                allocatedUsdt: sizing.notional,
+                riskAmount: sizing.finalRiskUsd,
+                marginPercent: botEquity > 0 ? Math.round((sizing.notional / botEquity) * 1000) / 10 : 15,
+                tp: gTrade.targetPrice,
+                sl: gTrade.stopLoss,
+              },
+              thesis: gTrade.thesis,
+            });
+
+            const isGeminiAI = geminiEngineUsed.startsWith('gemini');
+            const execTag = isGeminiAI
+              ? (isHybridBook ? '⚡ Gemini Hybrid AI' : '⚡ Gemini AI')
+              : buyTag;
+
+            newLogs.push({
+              id: `log-${nowMs}-${Math.random().toString(36).substring(2, 8)}-${gTrade.symbol}`,
+              timestamp: nowIso,
+              action: 'BUY_ENTRY',
+              symbol: gTrade.symbol,
+              price: gTrade.entryPrice,
+              quantity: sizing.quantity,
+              details: isEn
+                ? `[${execTag}] ${sizing.quantity} ${gTrade.symbol} @ $${gTrade.entryPrice}. Notional: $${sizing.notional.toLocaleString()} USDT. Actual risk: $${sizing.finalRiskUsd} (${sizing.finalRiskPct}% equity, stop-distance). SL: $${gTrade.stopLoss} · TP: $${gTrade.targetPrice} (R:R 1:${sizing.rewardRiskRatio}). Thesis: ${gTrade.thesis}`
+                : `[${execTag}] ${sizing.quantity} ${gTrade.symbol} @ $${gTrade.entryPrice}. Notional: $${sizing.notional.toLocaleString()} USDT. Risiko: $${sizing.finalRiskUsd} (${sizing.finalRiskPct}% ekuitas, jarak stop). SL: $${gTrade.stopLoss} · TP: $${gTrade.targetPrice} (R:R 1:${sizing.rewardRiskRatio}). Thesis: ${gTrade.thesis}`,
+            });
           }
         }
       }
+    }
 
-      // P0.2/T14 — alert karantina sekali per simbol per scan
-      for (const sym of quarantinedSymbols) {
-        newLogs.push({
-          id: `log-${nowMs}-quarantine-${sym}`,
-          timestamp: nowIso,
-          action: 'SIGNAL_SKIPPED',
-          symbol: sym,
-          price: stocks.find((s) => s.symbol === sym)?.currentPrice ?? 0,
-          details: isEn
-            ? `[RISK] Position ${sym} QUARANTINED: corrupted stop/target geometry (initial stop >= entry for LONG). Auto stop-loss DISABLED pending review — close manually or fix the signal source.`
-            : `[RISK] Posisi ${sym} DIKARANTINA: geometri stop/target rusak (initial stop >= entry untuk LONG). Auto stop-loss DINONAKTIFKAN menunggu tinjauan — tutup manual atau perbaiki sumber sinyal.`,
-        });
-      }
-
-      // 2. Scan AI Signals for New Entries with Strict Strategy Gating & Kelly Sizing
-      const botEquity = currentLiquidity + updatedPositions.reduce((sum, p) => sum + p.currentValue, 0);
-      const availableSlots = Math.max(0, cfg.maxConcurrentPositions - updatedPositions.length);
-
-      // P0.6 — circuit breakers DIEVALUASI sebelum entry apa pun (fail-closed)
-      const dailyRealizedPnl = bookClosedList
-        .filter((c) => (c.dateClosed || '').slice(0, 10) === nowIso.slice(0, 10))
-        .reduce((acc, c) => acc + c.realizedPnL, 0);
-      const riskEval = evaluateRiskEngine({
-        equity: botEquity,
-        openPositions: updatedPositions.map((p) => ({
-          symbol: p.symbol,
-          side: 'LONG' as const,
-          initialRiskUsd: p.stopLoss != null
-            ? p.sharesTotal * Math.abs(p.averageBuyPrice - p.stopLoss)
-            : p.totalCost * 0.02,
-          notional: p.currentValue,
-        })),
-        dailyRealizedPnl,
-        consecutiveStoppedTrades: riskState.consecutiveStopped,
-        cooldowns: riskState.cooldowns,
-        now: nowMs,
-        lastQuoteAgeMs: quoteAgeMs,
-        mode: 'PAPER',
-        killSwitch: cfg.entriesPaused ? 'PAUSE_ENTRIES' : 'NONE',
-        config: RISK_CONFIG,
-      });
-
-      const evaluatedReportCandidates: NonNullable<typeof scanAuditReport>['topCandidates'] = [];
-
-      // Sort all stocks by AI Confidence descending
-      const sortedStocks = [...stocks].sort((a, b) => b.aiSignal.confidenceScore - a.aiSignal.confidenceScore);
-
-      let slotsRemaining = availableSlots;
-
-      // P0.6 — bila risk engine memblokir, LOOP ENTRY DILEWATI SELURUHNYA.
-      // Pemantauan TP/SL posisi existing tetap telah berjalan di atas (fail-closed untuk entry saja).
-      // P1.2 — regime gate: TREND_DOWN / HIGH_VOLATILITY memblokir LONG baru.
-      const regimeNote = regimeBlocksLong
-        ? ` [REGIME ${marketRegime!.state}: ${marketRegime!.reasons[0] || 'pasar tidak mendukung LONG baru'}]`
-        : marketRegime ? ` [REGIME ${marketRegime.state}]` : '';
-      if (riskEval.canEnter && !regimeBlocksLong) for (const candidate of sortedStocks) {
+    // 2B. If slots remain and no trade opened by Gemini, evaluate algorithmic candidates
+    if (riskEval.canEnter && !regimeBlocksLong && slotsRemaining > 0 && openedCount === 0) {
+      for (const candidate of sortedStocks) {
+        if (slotsRemaining <= 0) break;
         const isAlreadyActive = updatedPositions.some((p) => p.symbol === candidate.symbol);
         const isLongSignal = candidate.aiSignal.action === 'Strong Long' || candidate.aiSignal.action === 'Long (Buy on Dip)';
         const meetsConfidence = candidate.aiSignal.confidenceScore >= cfg.minAiConfidence;
@@ -1046,8 +1303,6 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
           continue;
         }
 
-        // P0.2 (T01) — validasi geometri stop/target: TANPA koreksi otomatis.
-        // Stop rusak = kandidat ditolak dengan alasan eksplisit.
         const geo = validateInitialGeometry({
           side: 'LONG',
           entry: candidate.currentPrice,
@@ -1069,7 +1324,6 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
           continue;
         }
 
-        // P0.4 (T06) — cooldown per simbol setelah stop-loss
         if (isSymbolInCooldown(candidate.symbol, riskState.cooldowns, nowMs)) {
           evaluatedReportCandidates.push({
             symbol: candidate.symbol,
@@ -1105,96 +1359,46 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
           continue;
         }
 
-        // Candidate passed strategy gates!
-        if (slotsRemaining > 0) {
-          // P0.3 — sizing DETERMINISTIC dari stop-distance aktual (bukan % notional).
-          // Hard cap PAPER 0.5% ekuitas; multiplier hybrid hanya melonggarkan rencana,
-          // cap tetap ditegakkan. Risk & R:R final dihitung ulang setelah pembulatan.
-          const multiplier = isHybridBook ? (cfg.hybridRiskMultiplier || 1.0) : 1.0;
-          const sizing = computeOrderSizing({
-            side: 'LONG',
-            entry: candidate.currentPrice,
-            initialStop: candidate.aiSignal.stopLoss,
-            target: candidate.aiSignal.targetPrice1,
-            equity: botEquity,
-            riskFraction: Math.min((cfg.riskPerTradePercent / 100) * multiplier, RISK_CONFIG.perTradeRiskPct / 100),
-            availableCash: currentLiquidity,
-            minNotional: 10,
-            maxNotional: currentLiquidity,
-          });
+        const multiplier = isHybridBook ? (cfg.hybridRiskMultiplier || 1.0) : 1.0;
+        const sizing = computeOrderSizing({
+          side: 'LONG',
+          entry: candidate.currentPrice,
+          initialStop: candidate.aiSignal.stopLoss,
+          target: candidate.aiSignal.targetPrice1,
+          equity: botEquity,
+          riskFraction: Math.min((cfg.riskPerTradePercent / 100) * multiplier, RISK_CONFIG.perTradeRiskPct / 100),
+          availableCash: currentLiquidity,
+          minNotional: 10,
+          maxNotional: currentLiquidity,
+        });
 
-          if (sizing.valid && sizing.quantity > 0) {
-            currentLiquidity -= sizing.notional;
-            slotsRemaining--;
-            openedCount++;
+        if (sizing.valid && sizing.quantity > 0) {
+          currentLiquidity -= sizing.notional;
+          slotsRemaining--;
+          openedCount++;
 
-            const newPos: PortfolioPosition = {
-              id: `${idPrefix}-pos-${Date.now()}-${candidate.symbol}`,
-              symbol: candidate.symbol,
-              name: candidate.name,
-              market: 'CRYPTO',
-              quantity: sizing.quantity,
-              sharesTotal: sizing.quantity,
-              averageBuyPrice: candidate.currentPrice,
-              currentPrice: candidate.currentPrice,
-              totalCost: sizing.notional,
-              currentValue: sizing.notional,
-              unrealizedPnL: 0,
-              unrealizedPnLPercent: 0,
-              targetPrice: candidate.aiSignal.targetPrice1,
-              stopLoss: candidate.aiSignal.stopLoss,
-              dateAdded: new Date().toISOString().split('T')[0],
-              executedArchetype: isHybridBook ? 'HYBRID' : (cfg.archetype || 'AI_AUTONOMOUS'),
-              setupId: makeSetupId(candidate.symbol, isHybridBook ? 'HYBRID' : (cfg.archetype || 'PURE_AI'), nowMs),
-            };
+          const newPos: PortfolioPosition = {
+            id: `${idPrefix}-pos-${Date.now()}-${candidate.symbol}`,
+            symbol: candidate.symbol,
+            name: candidate.name,
+            market: 'CRYPTO',
+            quantity: sizing.quantity,
+            sharesTotal: sizing.quantity,
+            averageBuyPrice: candidate.currentPrice,
+            currentPrice: candidate.currentPrice,
+            totalCost: sizing.notional,
+            currentValue: sizing.notional,
+            unrealizedPnL: 0,
+            unrealizedPnLPercent: 0,
+            targetPrice: candidate.aiSignal.targetPrice1,
+            stopLoss: candidate.aiSignal.stopLoss,
+            dateAdded: new Date().toISOString().split('T')[0],
+            executedArchetype: isHybridBook ? 'HYBRID' : (cfg.archetype || 'AI_AUTONOMOUS'),
+            setupId: makeSetupId(candidate.symbol, isHybridBook ? 'HYBRID' : (cfg.archetype || 'PURE_AI'), nowMs),
+          };
 
-            updatedPositions.push(newPos);
+          updatedPositions.push(newPos);
 
-            evaluatedReportCandidates.push({
-              symbol: candidate.symbol,
-              name: candidate.name,
-              price: candidate.currentPrice,
-              action: candidate.aiSignal.action,
-              confidence: candidate.aiSignal.confidenceScore,
-              riskReward: candidate.aiSignal.riskRewardRatio,
-              status: 'EXECUTED',
-              sizing: {
-                units: sizing.quantity,
-                allocatedUsdt: sizing.notional,
-                riskAmount: sizing.finalRiskUsd,
-                marginPercent: botEquity > 0 ? Math.round((sizing.notional / botEquity) * 1000) / 10 : 15,
-                tp: candidate.aiSignal.targetPrice1,
-                sl: candidate.aiSignal.stopLoss,
-              },
-              thesis: candidate.aiSignal.thesis,
-            });
-
-            newLogs.push({
-              id: `log-${nowMs}-${Math.random().toString(36).substring(2, 8)}-${candidate.symbol}`,
-              timestamp: nowIso,
-              action: 'BUY_ENTRY',
-              symbol: candidate.symbol,
-              price: candidate.currentPrice,
-              quantity: sizing.quantity,
-              details: isEn
-                ? `[${buyTag}] ${sizing.quantity} ${candidate.symbol} @ $${candidate.currentPrice}. Notional: $${sizing.notional.toLocaleString()} USDT. Actual risk: $${sizing.finalRiskUsd} (${sizing.finalRiskPct}% of equity, stop-distance). SL: $${candidate.aiSignal.stopLoss} · TP: $${candidate.aiSignal.targetPrice1} (final R:R 1:${sizing.rewardRiskRatio}). setupId: ${newPos.setupId}.`
-                : `[${buyTag}] ${sizing.quantity} ${candidate.symbol} @ $${candidate.currentPrice}. Notional: $${sizing.notional.toLocaleString()} USDT. Risiko aktual: $${sizing.finalRiskUsd} (${sizing.finalRiskPct}% ekuitas, jarak stop). SL: $${candidate.aiSignal.stopLoss} · TP: $${candidate.aiSignal.targetPrice1} (R:R final 1:${sizing.rewardRiskRatio}). setupId: ${newPos.setupId}.`,
-            });
-          } else {
-            evaluatedReportCandidates.push({
-              symbol: candidate.symbol,
-              name: candidate.name,
-              price: candidate.currentPrice,
-              action: candidate.aiSignal.action,
-              confidence: candidate.aiSignal.confidenceScore,
-              riskReward: candidate.aiSignal.riskRewardRatio,
-              status: 'DISCIPLINE_HOLD',
-              disqualificationReason: `${sizing.reasonCode || 'REJECTED'}: ${sizing.detail || 'sizing tidak valid'}`,
-              thesis: candidate.aiSignal.thesis,
-            });
-          }
-        } else {
-          // Qualified candidate, but capacity is full
           evaluatedReportCandidates.push({
             symbol: candidate.symbol,
             name: candidate.name,
@@ -1202,64 +1406,92 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
             action: candidate.aiSignal.action,
             confidence: candidate.aiSignal.confidenceScore,
             riskReward: candidate.aiSignal.riskRewardRatio,
-            status: 'DISCIPLINE_HOLD',
-            disqualificationReason: isEn
-              ? `Max concurrent positions limit reached (${cfg.maxConcurrentPositions}/${cfg.maxConcurrentPositions} slots full). Risk management prevents random over-leveraging.`
-              : `Batas posisi aktif telah penuh (${cfg.maxConcurrentPositions}/${cfg.maxConcurrentPositions} slot). Disiplin manajemen risiko mencegah transaksi acak/over-leverage.`,
+            status: 'EXECUTED',
+            sizing: {
+              units: sizing.quantity,
+              allocatedUsdt: sizing.notional,
+              riskAmount: sizing.finalRiskUsd,
+              marginPercent: botEquity > 0 ? Math.round((sizing.notional / botEquity) * 1000) / 10 : 15,
+              tp: candidate.aiSignal.targetPrice1,
+              sl: candidate.aiSignal.stopLoss,
+            },
             thesis: candidate.aiSignal.thesis,
+          });
+
+          newLogs.push({
+            id: `log-${nowMs}-${Math.random().toString(36).substring(2, 8)}-${candidate.symbol}`,
+            timestamp: nowIso,
+            action: 'BUY_ENTRY',
+            symbol: candidate.symbol,
+            price: candidate.currentPrice,
+            quantity: sizing.quantity,
+            details: isEn
+              ? `[${buyTag}] ${sizing.quantity} ${candidate.symbol} @ $${candidate.currentPrice}. Notional: $${sizing.notional.toLocaleString()} USDT. Actual risk: $${sizing.finalRiskUsd} (${sizing.finalRiskPct}% of equity, stop-distance). SL: $${candidate.aiSignal.stopLoss} · TP: $${candidate.aiSignal.targetPrice1} (final R:R 1:${sizing.rewardRiskRatio}). setupId: ${newPos.setupId}.`
+              : `[${buyTag}] ${sizing.quantity} ${candidate.symbol} @ $${candidate.currentPrice}. Notional: $${sizing.notional.toLocaleString()} USDT. Risiko aktual: $${sizing.finalRiskUsd} (${sizing.finalRiskPct}% ekuitas, jarak stop). SL: $${candidate.aiSignal.stopLoss} · TP: $${candidate.aiSignal.targetPrice1} (R:R final 1:${sizing.rewardRiskRatio}). setupId: ${newPos.setupId}.`,
+          });
+
+          // Trigger robot mascot trade execution animation
+          triggerBotTradingAnimation({
+            symbol: candidate.symbol,
+            action: 'BUY',
+            price: candidate.currentPrice,
+            timestamp: nowMs,
           });
         }
       }
+    }
 
-      setPositions(updatedPositions);
-      setConfig((prev) => ({ ...prev, liquidityBalance: Math.round(currentLiquidity * 100) / 100 }));
-      if (newLogs.length > 0) {
-        setLogs((prev) => {
-          const combined = [...newLogs, ...prev];
-          const seen = new Set<string>();
-          return combined.filter((l) => {
-            if (!l || !l.id || seen.has(l.id)) return false;
-            seen.add(l.id);
-            return true;
-          });
+    setPositions(updatedPositions);
+    setConfig((prev) => ({ ...prev, liquidityBalance: Math.round(currentLiquidity * 100) / 100 }));
+    if (newLogs.length > 0) {
+      setLogs((prev) => {
+        const combined = [...newLogs, ...prev];
+        const seen = new Set<string>();
+        return combined.filter((l) => {
+          if (!l || !l.id || seen.has(l.id)) return false;
+          seen.add(l.id);
+          return true;
         });
-      }
-      setIsBotScanning(false);
-
-      const decisionSummary = (
-        !riskEval.canEnter
-          ? (isEn
-              ? `ENTRIES BLOCKED BY RISK ENGINE (${riskEval.health}): ${riskEval.reasons.join(' ')} Existing positions are still monitored for TP/SL.`
-              : `ENTRY DIBLOKIR RISK ENGINE (${riskEval.health}): ${riskEval.reasons.join(' ')} Posisi existing tetap dipantau untuk TP/SL.`)
-          : openedCount > 0
-          ? (isEn
-              ? `Execution Approved: ${bookLabel} opened ${openedCount} new trade(s). Sizing from actual stop-distance, hard cap ${RISK_CONFIG.perTradeRiskPct}% equity risk, R:R recalculated post-rounding.`
-              : `Eksekusi Disetujui: ${bookLabel} membuka ${openedCount} trade baru. Sizing dari jarak stop aktual, hard cap ${RISK_CONFIG.perTradeRiskPct}% risiko ekuitas, R:R dihitung ulang pasca-pembulatan.`)
-          : availableSlots === 0
-          ? (isEn
-              ? `Discipline Maintained: All ${cfg.maxConcurrentPositions}/${cfg.maxConcurrentPositions} slots are currently filled. No random trades until an existing trade hits TP or SL.`
-              : `Disiplin Terjaga: Seluruh ${cfg.maxConcurrentPositions}/${cfg.maxConcurrentPositions} slot posisi terisi. Tidak ada eksekusi acak sampai posisi aktif mencapai TP atau SL.`)
-          : (isEn
-              ? `Scan Complete: Scanned ${stocks.length} assets. No unheld assets satisfy Confidence ≥ ${cfg.minAiConfidence}/100, R:R ≥ 1:${cfg.minRiskReward}, and valid stop geometry.`
-              : `Pemindaian Selesai: Memindai ${stocks.length} aset. Tidak ada aset baru yang memenuhi Confidence ≥ ${cfg.minAiConfidence}/100, R:R ≥ 1:${cfg.minRiskReward}, dan geometri stop valid.`)
-      ) + (quarantinedSymbols.size > 0 ? ` [${isEn ? 'QUARANTINED' : 'DIKARANTINA'}: ${Array.from(quarantinedSymbols).join(', ')} — stop invalid, auto-SL off]` : '') + regimeNote;
-
-      setScanAuditReport({
-        timestamp: new Date().toLocaleTimeString(isEn ? 'en-US' : 'id-ID'),
-        totalUniverseScanned: stocks.length,
-        activeSlotsOccupied: updatedPositions.length,
-        maxSlots: cfg.maxConcurrentPositions,
-        availableSlots: Math.max(0, cfg.maxConcurrentPositions - updatedPositions.length),
-        botCashAvailable: Math.round(currentLiquidity * 100) / 100,
-        topCandidates: evaluatedReportCandidates.slice(0, 8),
-        overallDecisionSummary: decisionSummary,
       });
+    }
+    setIsBotScanning(false);
 
-      setBotScanResultMsg(decisionSummary);
-      if (!auto) setShowAuditModal(true);
-      if (isHybridBook) setLastHybridScanAt(new Date()); else setLastBotScanAt(new Date());
-      botScanRunningRef.current = false;
-    }, 600);
+    const isGeminiAI = geminiEngineUsed.startsWith('gemini');
+    const engineBadge = isGeminiAI ? `⚡ Gemini AI (${geminiEngineUsed.replace('gemini-', '')})` : '⚡ AI Quant Engine';
+
+    const decisionSummary = (
+      !riskEval.canEnter
+        ? (isEn
+            ? `ENTRIES BLOCKED BY RISK ENGINE (${riskEval.health}): ${riskEval.reasons.join(' ')} Existing positions are still monitored for TP/SL.`
+            : `ENTRY DIBLOKIR RISK ENGINE (${riskEval.health}): ${riskEval.reasons.join(' ')} Posisi existing tetap dipantau untuk TP/SL.`)
+        : openedCount > 0
+        ? (isEn
+            ? `${engineBadge}: Executed ${openedCount} high-conviction trade(s). ${geminiMarketAnalysis ? `(${geminiMarketAnalysis}) ` : ''}Sizing strictly calibrated to actual stop-distance, hard cap ${RISK_CONFIG.perTradeRiskPct}% equity risk.`
+            : `${engineBadge}: Mengeksekusi ${openedCount} posisi terpilih. ${geminiMarketAnalysis ? `(${geminiMarketAnalysis}) ` : ''}Sizing terkalibrasi presisi dengan jarak stop aktual, hard cap ${RISK_CONFIG.perTradeRiskPct}% risiko ekuitas.`)
+        : availableSlots === 0
+        ? (isEn
+            ? `Discipline Maintained: All ${cfg.maxConcurrentPositions}/${cfg.maxConcurrentPositions} slots are currently filled. No random trades until an existing trade hits TP or SL.`
+            : `Disiplin Terjaga: Seluruh ${cfg.maxConcurrentPositions}/${cfg.maxConcurrentPositions} slot posisi terisi. Tidak ada eksekusi acak sampai posisi aktif mencapai TP atau SL.`)
+        : (isEn
+            ? `${engineBadge} Scan Complete: Evaluated live market assets. No unheld assets currently satisfy Confidence ≥ ${cfg.minAiConfidence}/100, R:R ≥ 1:${cfg.minRiskReward}, and valid risk geometry.`
+            : `${engineBadge} Pemindaian Selesai: Mengevaluasi aset pasar live. Tidak ada aset baru yang memenuhi Confidence ≥ ${cfg.minAiConfidence}/100, R:R ≥ 1:${cfg.minRiskReward}, dan geometri risiko valid.`)
+    ) + (quarantinedSymbols.size > 0 ? ` [${isEn ? 'QUARANTINED' : 'DIKARANTINA'}: ${Array.from(quarantinedSymbols).join(', ')} — stop invalid, auto-SL off]` : '') + regimeNote;
+
+    setScanAuditReport({
+      timestamp: new Date().toLocaleTimeString(isEn ? 'en-US' : 'id-ID'),
+      totalUniverseScanned: stocks.length,
+      activeSlotsOccupied: updatedPositions.length,
+      maxSlots: cfg.maxConcurrentPositions,
+      availableSlots: Math.max(0, cfg.maxConcurrentPositions - updatedPositions.length),
+      botCashAvailable: Math.round(currentLiquidity * 100) / 100,
+      topCandidates: evaluatedReportCandidates.slice(0, 8),
+      overallDecisionSummary: decisionSummary,
+    });
+
+    setBotScanResultMsg(decisionSummary);
+    if (!auto || isTestScan) setShowAuditModal(true);
+    if (isHybridBook) setLastHybridScanAt(new Date()); else setLastBotScanAt(new Date());
+    botScanRunningRef.current = false;
   };
 
   // Autopilot 24/7 — dua buku berjalan independen: Pure AI & Hybrid masing-masing
@@ -1407,7 +1639,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
   const bookInitialConfig = isHybridMode ? INITIAL_HYBRID_CONFIG : INITIAL_BOT_CONFIG;
   const bookConfigStorageKey = isHybridMode ? 'halfy_hybrid_config_crypto_v1' : 'halfy_bot_config_crypto_v1';
   const bookLastScanAt = isHybridMode ? lastHybridScanAt : lastBotScanAt;
-  const scanCurrentBook = (auto = false) => runBotScan(isHybridMode ? 'hybrid' : 'bot', auto);
+  const scanCurrentBook = (auto = false, isTestScan = false) => runBotScan(isHybridMode ? 'hybrid' : 'bot', auto, isTestScan);
 
   // P0.6 — risk health buku aktif untuk UI (dihitung dari state live, bukan klaim)
   const bookRiskEval = (() => {
@@ -1487,7 +1719,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                 onClick={() => setPortfolioMode('bot')}
                 className={`px-3 py-2 text-xs font-semibold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer ${
                   portfolioMode === 'bot'
-                    ? 'bg-sky-500 text-white font-bold shadow-sm'
+                    ? 'bg-emerald-500 text-slate-950 font-bold shadow-sm'
                     : 'text-slate-400 hover:text-white'
                 }`}
               >
@@ -1574,7 +1806,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                   <Wallet className="w-3.5 h-3.5 text-sky-400" />
                   <span>{t.balanceLiquidity}</span>
                 </span>
-                <span className="text-[10px] text-sky-400 bg-sky-950/60 border border-sky-800/60 px-1.5 py-0.2 rounded font-mono">
+                <span className="text-[11px] text-slate-400 font-mono">
                   {t.availLiquidity}
                 </span>
               </div>
@@ -1605,7 +1837,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                   <Coins className="w-3.5 h-3.5 text-amber-400" />
                   <span>{t.positionsValue}</span>
                 </span>
-                <span className="text-[10px] text-emerald-400 bg-emerald-950/60 border border-emerald-800/60 px-1.5 py-0.2 rounded font-mono">
+                <span className="text-[11px] text-slate-400 font-mono">
                   Live Binance
                 </span>
               </div>
@@ -1626,7 +1858,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                   <Scale className="w-3.5 h-3.5 text-purple-400" />
                   <span>{t.totalNetWorth}</span>
                 </span>
-                <span className="text-[10px] text-purple-400 bg-purple-950/60 border border-purple-800/60 px-1.5 py-0.2 rounded font-mono">
+                <span className="text-[11px] text-slate-400 font-mono">
                   Cash + Pos
                 </span>
               </div>
@@ -1647,7 +1879,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                   <Zap className="w-3.5 h-3.5 text-amber-400" />
                   <span>{t.pnlTitle}</span>
                 </span>
-                <span className="text-[10px] text-slate-400 bg-slate-800 px-1.5 py-0.2 rounded font-mono">
+                <span className="text-[11px] text-slate-400 font-mono">
                   {t.liveUnrealized}
                 </span>
               </div>
@@ -1689,7 +1921,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                   <Trophy className="w-3.5 h-3.5 text-amber-400" />
                   <span>{t.winrateTitle}</span>
                 </span>
-                <span className="text-[10px] text-amber-300 bg-amber-950/60 border border-amber-800/60 px-1.5 py-0.2 rounded font-mono">
+                <span className="text-[11px] text-slate-400 font-mono">
                   {t.closedTradesBadge}
                 </span>
               </div>
@@ -1963,147 +2195,27 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
          ========================================================================= */}
       {(portfolioMode === 'bot' || portfolioMode === 'hybrid') && (
         <div className="space-y-6">
-          {/* Bot Control Panel & Strategy Matrix */}
-          <div className="bg-[#0e1626] border border-sky-900/60 rounded-2xl p-6 shadow-sm">
-            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-5 pb-5 border-b border-slate-800">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-sky-500/15 border border-sky-500/30 flex items-center justify-center text-sky-400">
-                  <Bot className="w-5 h-5" />
-                </div>
-                <div>
-                  <div className="flex items-center gap-2">
-                    <h2 className="text-lg font-bold text-white font-mono">
-                      {(isHybridMode ? (isEn ? 'Hybrid AI Autotrade Engine' : 'Engine Autotrade Hybrid AI') : t.botEngineTitle)}
-                    </h2>
-                    <span
-                      className={`text-[11px] px-2.5 py-0.5 rounded-full font-mono font-bold flex items-center gap-1.5 border ${
-                        bookConfig.isActive
-                          ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40'
-                          : 'bg-slate-800 text-slate-400 border-slate-700'
-                      }`}
-                    >
-                      <span className={`w-2 h-2 rounded-full ${bookConfig.isActive ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500'}`} />
-                      <span>{bookConfig.isActive ? t.botActiveBadge : t.botPausedBadge}</span>
-                    </span>
-                    <span
-                      className={`text-[11px] px-2.5 py-0.5 rounded-full font-mono font-bold border ${
-                        bookConfig.archetype === 'HYBRID'
-                          ? 'bg-purple-500/15 text-purple-300 border-purple-500/40'
-                          : 'bg-sky-500/15 text-sky-300 border-sky-500/40'
-                      }`}
-                    >
-                      {bookConfig.archetype === 'HYBRID'
-                        ? `HYBRID · ${bookConfig.hybridRiskMultiplier || 1.25}x RISK`
-                        : isEn ? 'PURE AI MODE' : 'MODE PURE AI'}
-                    </span>
-                    {bookConfig.isActive && (bookConfig.autoScanIntervalSec || 0) > 0 && (
-                      <span className="text-[11px] px-2.5 py-0.5 rounded-full font-mono font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/40 flex items-center gap-1.5">
-                        <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                        {isEn ? `AUTOPILOT 24/7 · every ${bookConfig.autoScanIntervalSec}s` : `AUTOPILOT 24/7 · tiap ${bookConfig.autoScanIntervalSec}s`}
-                        {bookLastScanAt && (
-                          <span className="text-emerald-400/70 font-normal">
-                            · {isEn ? 'last' : 'terakhir'} {bookLastScanAt.toLocaleTimeString(isEn ? 'en-US' : 'id-ID')}
-                          </span>
-                        )}
-                      </span>
-                    )}
-                    {bookRiskEval.health !== 'HEALTHY' && (
-                      <span
-                        className={`text-[11px] px-2.5 py-0.5 rounded-full font-mono font-bold border ${
-                          bookRiskEval.health === 'HALTED'
-                            ? 'bg-rose-500/15 text-rose-300 border-rose-500/40'
-                            : 'bg-amber-500/15 text-amber-300 border-amber-500/40'
-                        }`}
-                        title={bookRiskEval.reasons.join(' · ')}
-                      >
-                        {isEn ? 'RISK' : 'RISIKO'}: {bookRiskEval.health} · HEAT {bookRiskEval.portfolioHeatPct}%
-                        {bookConfig.entriesPaused ? ` · ${isEn ? 'ENTRIES PAUSED' : 'ENTRY DIPAUSET'}` : ''}
-                      </span>
-                    )}
-                    {marketRegime && (
-                      <span
-                        className={`text-[11px] px-2.5 py-0.5 rounded-full font-mono font-bold border ${
-                          marketRegime.state === 'TREND_UP'
-                            ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
-                            : marketRegime.state === 'TREND_DOWN' || marketRegime.state === 'HIGH_VOLATILITY'
-                            ? 'bg-rose-500/15 text-rose-300 border-rose-500/40'
-                            : 'bg-slate-800 text-slate-300 border-slate-700'
-                        }`}
-                        title={marketRegime.reasons.join(' · ') + ` · breadth ${marketRegime.breadthPct}%`}
-                      >
-                        REGIME: {marketRegime.state} · Breadth {marketRegime.breadthPct}%
-                      </span>
-                    )}
-                  </div>
-                  <p className="text-xs text-slate-300 mt-1 font-sans">
-                    {t.botEngineDesc}
-                  </p>
-                </div>
-              </div>
-
-              {/* Bot Actions */}
-              <div className="flex items-center gap-2.5 shrink-0">
-                <button
-                  onClick={() => setBookConfig((prev) => ({ ...prev, isActive: !prev.isActive }))}
-                  className={`px-3.5 py-2 rounded-xl text-xs font-mono font-bold flex items-center gap-1.5 transition-colors cursor-pointer border ${
-                    bookConfig.isActive
-                      ? 'bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border-rose-500/40'
-                      : 'bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border-emerald-500/40'
-                  }`}
-                >
-                  {bookConfig.isActive ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
-                  <span>{bookConfig.isActive ? t.pauseBotBtn : t.activateBotBtn}</span>
-                </button>
-
-                <button
-                  onClick={() => scanCurrentBook(false)}
-                  disabled={isBotScanning}
-                  className="px-4 py-2 bg-sky-500 hover:bg-sky-400 text-slate-950 text-xs font-mono font-bold rounded-xl flex items-center gap-2 shadow-md transition-all cursor-pointer disabled:opacity-50"
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 ${isBotScanning ? 'animate-spin' : ''}`} />
-                  <span>{isBotScanning ? t.scanningText : t.scanAndExecuteBtn}</span>
-                </button>
-
-                {/* Settings & Strategi inline — menyatu di halaman portofolio bot */}
-                <button
-                  onClick={() => setShowBotSettingsPanel((prev) => !prev)}
-                  className={`px-3.5 py-2 rounded-xl text-xs font-mono font-bold flex items-center gap-1.5 transition-colors cursor-pointer border ${
-                    showBotSettingsPanel
-                      ? 'bg-emerald-500 text-slate-950 border-emerald-400 shadow-md'
-                      : 'bg-slate-900 hover:bg-slate-800 text-slate-300 border-slate-700'
-                  }`}
-                >
-                  <SlidersHorizontal className="w-3.5 h-3.5" />
-                  <span>{isEn ? 'Strategy & Settings' : 'Strategi & Pengaturan'}</span>
-                </button>
-
-                {/* P0.6 — kill switch PAUSE_ENTRIES: TP/SL tetap dipantau, entry baru diblok */}
-                <button
-                  onClick={() => setBookConfig((prev) => ({ ...prev, entriesPaused: !prev.entriesPaused }))}
-                  className={`px-3.5 py-2 rounded-xl text-xs font-mono font-bold flex items-center gap-1.5 transition-colors cursor-pointer border ${
-                    bookConfig.entriesPaused
-                      ? 'bg-amber-500 text-slate-950 border-amber-400 shadow-md'
-                      : 'bg-slate-900 hover:bg-slate-800 text-slate-300 border-slate-700'
-                  }`}
-                  title={isEn
-                    ? 'Kill switch: block NEW entries while keeping TP/SL management active'
-                    : 'Kill switch: blokir entry BARU sambil TP/SL posisi tetap dikelola'}
-                >
-                  <ShieldCheck className={`w-3.5 h-3.5 ${bookConfig.entriesPaused ? '' : 'text-amber-400'}`} />
-                  <span>{bookConfig.entriesPaused ? (isEn ? 'Entries Paused' : 'Entry Dipause') : (isEn ? 'Pause Entries' : 'Jeda Entry')}</span>
-                </button>
-
-                {scanAuditReport && (
-                  <button
-                    onClick={() => setShowAuditModal(true)}
-                    className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-sky-400 hover:text-white border border-slate-700 rounded-xl text-xs font-mono font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
-                  >
-                    <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-                    <span>{t.viewAuditReport}</span>
-                  </button>
-                )}
-              </div>
-            </div>
+          {/* Animated Trading Robot Unified Command Banner (Hijau untuk Pure AI, Ungu untuk Hybrid Bot) */}
+          <TradingRobotMascot
+            variant={isHybridMode ? 'hybrid' : 'pure_ai'}
+            state={isBotTradingActive ? 'trading' : isBotScanning ? 'scanning' : 'idle'}
+            lastTrade={lastBotTradeEvent}
+            isBotActive={bookConfig.isActive}
+            onToggleActive={() => setBookConfig((prev) => ({ ...prev, isActive: !prev.isActive }))}
+            onTriggerScan={() => scanCurrentBook(false)}
+            onOpenSettings={() => setShowBotSettingsPanel((prev) => !prev)}
+            showSettings={showBotSettingsPanel}
+            isPausedEntries={bookConfig.entriesPaused}
+            onTriggerDemoTrade={() => {
+              triggerBotTradingAnimation({
+                symbol: 'SOLUSDT',
+                action: 'BUY',
+                price: 185.4,
+                timestamp: Date.now(),
+              });
+            }}
+            isEn={isEn}
+          />
 
             {botScanResultMsg && (
               <div className="mt-4 p-3 rounded-xl bg-sky-950/40 border border-sky-800/60 text-xs font-mono text-sky-300 flex flex-wrap items-center justify-between gap-2.5">
@@ -2204,7 +2316,6 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                 </div>
               );
             })()}
-          </div>
 
           {/* Bot Positions & CLOSED POSITIONS HISTORY Sub-Tabs */}
           <div className="bg-[#0b1322] border border-slate-800 rounded-2xl p-6 shadow-sm">
@@ -2334,12 +2445,12 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                               <td className="py-3.5 px-3.5 text-right whitespace-nowrap">
                                 <div className="flex items-center justify-end gap-2">
                                   {pos.stopLoss != null && pos.stopLoss >= pos.averageBuyPrice ? (
-                                    <span className="text-[10px] font-mono font-bold text-rose-300 bg-rose-950/80 px-2 py-1 rounded border border-rose-500/60 hidden xl:inline-block">
-                                      QUARANTINED
+                                    <span className="text-[11px] font-mono text-rose-400 font-medium hidden xl:inline-block">
+                                      ⚠ Quarantined
                                     </span>
                                   ) : (
-                                    <span className="text-[10px] font-mono font-bold text-sky-400 bg-sky-950/80 px-2 py-1 rounded border border-sky-800/60 hidden xl:inline-block">
-                                      AUTO TP/SL
+                                    <span className="text-[11px] font-mono text-sky-400/80 font-medium hidden xl:inline-block">
+                                      ● Auto TP/SL
                                     </span>
                                   )}
                                   <button
@@ -2520,49 +2631,83 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
       )}
 
       {/* =========================================================================
-          VIEW MODE 3: BOT SETTINGS & STRATEGY MATRIX
+          VIEW MODE 3: BOT SETTINGS & STRATEGY MATRIX (DEDICATED OVERLAY MODAL)
          ========================================================================= */}
-      {/* Settings & Strategi Bot — mode terpisah (kompatibilitas) atau panel inline di dalam mode Bot */}
       {(portfolioMode === 'settings' || ((portfolioMode === 'bot' || portfolioMode === 'hybrid') && showBotSettingsPanel)) && (
-        <div className="space-y-6 animate-in fade-in duration-200">
-          {/* Header Banner */}
-          <div className="bg-[#0b1322] border border-emerald-500/30 rounded-2xl p-6 shadow-sm">
-            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
-                  <SlidersHorizontal className="w-5 h-5" />
+        <div 
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-3 sm:p-6 overflow-y-auto"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) {
+              setShowBotSettingsPanel(false);
+              if (portfolioMode === 'settings') setPortfolioMode(isHybridMode ? 'hybrid' : 'bot');
+            }
+          }}
+        >
+          <div className="bg-[#0b1322] border border-slate-700/80 rounded-2xl w-full max-w-5xl max-h-[92vh] overflow-y-auto p-4 sm:p-7 shadow-2xl space-y-6 animate-in fade-in zoom-in-95 duration-200 relative">
+            {/* Header Banner */}
+            <div className="bg-[#0e172a] border border-emerald-500/30 rounded-2xl p-5 shadow-sm">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
+                    <SlidersHorizontal className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h2 className="text-lg font-bold text-white tracking-tight">
+                        {isHybridMode
+                          ? (isEn ? 'Hybrid AI Bot Settings & Strategy' : 'Pengaturan & Strategi Bot Hybrid AI')
+                          : (isEn ? 'Pure AI Autotrade Bot Settings' : 'Pengaturan Bot Pure AI Autotrade')}
+                      </h2>
+                      <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-sky-950 text-sky-400 border border-sky-800 flex items-center gap-1">
+                        <Sparkles className="w-3 h-3 text-sky-400" />
+                        <span>Gemini 3.8 Flash</span>
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-300 mt-1 max-w-2xl leading-relaxed">
+                      {isHybridMode
+                        ? (isEn ? 'Customize risk per trade, stop-distance sizing, R:R filters, and strategy focus while retaining Gemini AI multi-factor scanning.' : 'Atur risiko per trade, sizing jarak stop, filter R:R, dan fokus strategi dengan tetap memanfaatkan scan multi-faktor Gemini AI.')
+                        : (isEn ? 'Autonomous institutional execution with locked rules for fair Battle Arena competition.' : 'Eksekusi institusional otonom dengan aturan terkunci demi keadilan kompetisi Battle Arena.')}
+                    </p>
+                  </div>
                 </div>
-                <div>
-                  <h2 className="text-lg font-bold text-white tracking-tight">
-                    {t.archetypeTitle || (isEn ? 'Bot Execution Settings & Strategy Matrix' : 'Pengaturan Eksekusi Bot & Matriks Strategi')}
-                  </h2>
-                  <p className="text-xs text-slate-300 mt-1 max-w-2xl leading-relaxed">
-                    {t.archetypeDesc || (isEn ? 'Configure AI execution archetypes, strategy focus from Crypto AI Picks & Radar, risk per trade, and position sizing models.' : 'Atur arsitektur eksekusi, fokus sinyal AI Picks, risiko per trade, dan model perhitungan ukuran posisi.')}
-                  </p>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleRestoreDefaultSettings}
+                    className="px-3.5 py-2 text-xs font-semibold rounded-xl border border-slate-700 bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white transition-colors cursor-pointer flex items-center gap-1.5"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5 text-slate-400" />
+                    <span>{t.restoreDefaultsBtn || (isEn ? 'Restore Defaults' : 'Kembalikan Standar')}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      handleSaveBotSettings(bookConfig);
+                      setShowBotSettingsPanel(false);
+                      if (portfolioMode === 'settings') setPortfolioMode(isHybridMode ? 'hybrid' : 'bot');
+                    }}
+                    className="px-4 py-2 text-xs font-bold rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 transition-colors shadow-sm cursor-pointer flex items-center gap-1.5"
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                    <span>{t.saveSettingsBtn || (isEn ? 'Save' : 'Simpan')}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowBotSettingsPanel(false);
+                      if (portfolioMode === 'settings') setPortfolioMode(isHybridMode ? 'hybrid' : 'bot');
+                    }}
+                    className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer ml-1"
+                    title={isEn ? 'Close' : 'Tutup'}
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
                 </div>
-              </div>
-
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={handleRestoreDefaultSettings}
-                  className="px-3.5 py-2 text-xs font-semibold rounded-xl border border-slate-700 bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white transition-colors cursor-pointer"
-                >
-                  <RotateCcw className="w-3.5 h-3.5 inline mr-1.5 text-slate-400" />
-                  <span>{t.restoreDefaultsBtn || (isEn ? 'Restore Defaults' : 'Kembalikan Standar')}</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => handleSaveBotSettings(bookConfig)}
-                  className="px-4 py-2 text-xs font-bold rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 transition-colors shadow-sm cursor-pointer flex items-center gap-1.5"
-                >
-                  <Check className="w-3.5 h-3.5" />
-                  <span>{t.saveSettingsBtn || (isEn ? 'Save Configuration' : 'Simpan Konfigurasi')}</span>
-                </button>
               </div>
             </div>
-          </div>
 
           {/* Section 1: Execution Archetype (AI vs Hybrid vs Manual) */}
           <div className="bg-[#0b1322] border border-slate-800 rounded-2xl p-6 shadow-sm space-y-4">
@@ -2679,89 +2824,133 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
 
           {/* Section 2: Strategy Focus Matrix (Crypto AI Picks & Radar) */}
           <div className="bg-[#0b1322] border border-slate-800 rounded-2xl p-6 shadow-sm space-y-4">
-            <div className="border-b border-slate-800 pb-3">
-              <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                <Target className="w-4 h-4 text-amber-400" />
-                <span>{t.strategyFocusTitle || (isEn ? '2. Strategy Focus (Crypto AI Picks & Radar Primary Engine)' : '2. Fokus Strategi (Crypto AI Picks & Radar)')}</span>
-              </h3>
-              <span className="text-xs text-slate-400">
-                {isEn ? 'Filter which market setups the AI scanner prioritizes from the 24/7 intelligence terminal' : 'Filter jenis setup pasar yang diprioritaskan oleh bot scanner dari terminal 24/7'}
-              </span>
+            <div className="border-b border-slate-800 pb-3 flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                  <Target className="w-4 h-4 text-amber-400" />
+                  <span>{isEn ? '2. Strategy Focus & Multi-Factor Intelligence' : '2. Fokus Strategi & Intelijen Multi-Faktor'}</span>
+                </h3>
+                <span className="text-xs text-slate-400">
+                  {isEn
+                    ? (isHybridMode ? 'Select which market setups the Hybrid AI Bot prioritizes' : 'Pure AI dynamically weights all setups based on market regime and Kelly criterion')
+                    : (isHybridMode ? 'Pilih jenis setup pasar yang diprioritaskan oleh Bot Hybrid AI' : 'Pure AI menentukan bobot setup secara otonom berdasarkan rezim pasar dan kriteria Kelly')}
+                </span>
+              </div>
+              {!isHybridMode && (
+                <span className="text-xs font-mono font-bold px-2.5 py-1 rounded-lg bg-sky-500/15 text-sky-300 border border-sky-500/30 flex items-center gap-1.5">
+                  <Bot className="w-3.5 h-3.5 text-sky-400" />
+                  <span>{isEn ? 'PURE AI LOCKED' : 'TERKUNCI OTONOM'}</span>
+                </span>
+              )}
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
-              {/* All Signals */}
-              <div
-                onClick={() => setBookConfig((prev) => ({ ...prev, strategyFocus: 'ALL_SIGNALS' }))}
-                className={`p-3.5 rounded-xl border transition-all cursor-pointer ${
-                  bookConfig.strategyFocus === 'ALL_SIGNALS' || !bookConfig.strategyFocus
-                    ? 'bg-amber-950/30 border-amber-500/80 ring-1 ring-amber-500/30'
-                    : 'bg-slate-900/60 border-slate-800 hover:border-slate-700'
-                }`}
-              >
-                <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-xs font-bold text-white">{t.strategyAll || 'All Signals'}</span>
-                  <span className="text-[10px] text-amber-400 font-mono">18 Coins</span>
+            {!isHybridMode ? (
+              /* Pure AI: Display-only / Locked philosophy banner as instructed by user */
+              <div className="p-4 rounded-xl bg-slate-900/80 border border-sky-500/30 space-y-3">
+                <div className="flex items-center gap-2 text-xs font-bold text-sky-400">
+                  <Bot className="w-4 h-4" />
+                  <span>{isEn ? 'Autonomous Neural Multi-Factor Engine (Locked for Battle Arena Competition)' : 'Engine Neural Multi-Faktor Otonom (Terkunci demi Keadilan Arena Kompetisi)'}</span>
                 </div>
-                <p className="text-[11px] text-slate-300 leading-normal">
-                  {isEn ? 'Evaluates all qualified setups across AI, L1, DeFi, and Memecoins.' : 'Memindai seluruh narasi (AI, L1, DeFi, Memecoin) dengan skor tertinggi.'}
+                <p className="text-xs text-slate-300 leading-relaxed">
+                  {isEn
+                    ? 'In Pure AI mode, all setups across Whale Inflows, Momentum Breakouts, and Oversold Dips are evaluated autonomously without user overrides. This ensures the AI competes authentically against your manual and hybrid trading in the Battle Arena. To customize strategy focus, switch to Hybrid AI Bot.'
+                    : 'Pada mode Pure AI, seluruh setup (Aliran Whale, Momentum Breakout, dan Pantulan Oversold) dievaluasi secara otonom tanpa campur tangan pengguna. Ini menjamin AI bersaing murni melawan trading manual dan hybrid Anda di Battle Arena. Untuk mengkustomisasi fokus strategi, gunakan Bot Hybrid AI.'}
                 </p>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 pt-1 font-mono text-[11px]">
+                  <div className="p-2.5 rounded-lg bg-slate-950/70 border border-slate-800 text-slate-300">
+                    <span className="text-sky-400 font-bold block">1. Whale Flow</span>
+                    <span className="text-slate-400 text-[10px]">CEX Reserve Outflows</span>
+                  </div>
+                  <div className="p-2.5 rounded-lg bg-slate-950/70 border border-slate-800 text-slate-300">
+                    <span className="text-emerald-400 font-bold block">2. Breakout</span>
+                    <span className="text-slate-400 text-[10px]">EMA Resistance Thrust</span>
+                  </div>
+                  <div className="p-2.5 rounded-lg bg-slate-950/70 border border-slate-800 text-slate-300">
+                    <span className="text-rose-400 font-bold block">3. Oversold</span>
+                    <span className="text-slate-400 text-[10px]">RSI Mean Reversion</span>
+                  </div>
+                  <div className="p-2.5 rounded-lg bg-slate-950/70 border border-slate-800 text-slate-300">
+                    <span className="text-purple-400 font-bold block">4. Sizing</span>
+                    <span className="text-slate-400 text-[10px]">Kelly Math Compounding</span>
+                  </div>
+                </div>
               </div>
+            ) : (
+              /* Hybrid AI & Manual: Fully interactive strategy selector */
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+                {/* All Signals */}
+                <div
+                  onClick={() => setBookConfig((prev) => ({ ...prev, strategyFocus: 'ALL_SIGNALS' }))}
+                  className={`p-3.5 rounded-xl border transition-all cursor-pointer ${
+                    bookConfig.strategyFocus === 'ALL_SIGNALS' || !bookConfig.strategyFocus
+                      ? 'bg-amber-950/30 border-amber-500/80 ring-1 ring-amber-500/30'
+                      : 'bg-slate-900/60 border-slate-800 hover:border-slate-700'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-xs font-bold text-white">{t.strategyAll || 'All Signals'}</span>
+                    <span className="text-[10px] text-amber-400 font-mono">{stocks.length} Coins</span>
+                  </div>
+                  <p className="text-[11px] text-slate-300 leading-normal">
+                    {isEn ? 'Evaluates all qualified setups across AI, L1, DeFi, and Memecoins.' : 'Memindai seluruh narasi (AI, L1, DeFi, Memecoin) dengan skor tertinggi.'}
+                  </p>
+                </div>
 
-              {/* Whale Inflow */}
-              <div
-                onClick={() => setBookConfig((prev) => ({ ...prev, strategyFocus: 'WHALE_INFLOW' }))}
-                className={`p-3.5 rounded-xl border transition-all cursor-pointer ${
-                  bookConfig.strategyFocus === 'WHALE_INFLOW'
-                    ? 'bg-sky-950/30 border-sky-500/80 ring-1 ring-sky-500/30'
-                    : 'bg-slate-900/60 border-slate-800 hover:border-slate-700'
-                }`}
-              >
-                <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-xs font-bold text-white">{t.strategyWhale || 'Whale Accumulation'}</span>
-                  <span className="text-[10px] text-sky-400 font-mono">On-Chain</span>
+                {/* Whale Inflow */}
+                <div
+                  onClick={() => setBookConfig((prev) => ({ ...prev, strategyFocus: 'WHALE_INFLOW' }))}
+                  className={`p-3.5 rounded-xl border transition-all cursor-pointer ${
+                    bookConfig.strategyFocus === 'WHALE_INFLOW'
+                      ? 'bg-sky-950/30 border-sky-500/80 ring-1 ring-sky-500/30'
+                      : 'bg-slate-900/60 border-slate-800 hover:border-slate-700'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-xs font-bold text-white">{t.strategyWhale || 'Whale Accumulation'}</span>
+                    <span className="text-[10px] text-sky-400 font-mono">On-Chain</span>
+                  </div>
+                  <p className="text-[11px] text-slate-300 leading-normal">
+                    {isEn ? 'Focuses on institutional wallet inflows and exchange reserve outflows.' : 'Fokus pada lonjakan akumulasi dompet bandar besar & outflow bursa.'}
+                  </p>
                 </div>
-                <p className="text-[11px] text-slate-300 leading-normal">
-                  {isEn ? 'Focuses on institutional wallet inflows and exchange reserve outflows.' : 'Fokus pada lonjakan akumulasi dompet bandar besar & outflow bursa.'}
-                </p>
-              </div>
 
-              {/* Breakout Momentum */}
-              <div
-                onClick={() => setBookConfig((prev) => ({ ...prev, strategyFocus: 'BREAKOUT_MOMENTUM' }))}
-                className={`p-3.5 rounded-xl border transition-all cursor-pointer ${
-                  bookConfig.strategyFocus === 'BREAKOUT_MOMENTUM'
-                    ? 'bg-emerald-950/30 border-emerald-500/80 ring-1 ring-emerald-500/30'
-                    : 'bg-slate-900/60 border-slate-800 hover:border-slate-700'
-                }`}
-              >
-                <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-xs font-bold text-white">{t.strategyBreakout || 'Breakout Momentum'}</span>
-                  <span className="text-[10px] text-emerald-400 font-mono">Dynamic Res</span>
+                {/* Breakout Momentum */}
+                <div
+                  onClick={() => setBookConfig((prev) => ({ ...prev, strategyFocus: 'BREAKOUT_MOMENTUM' }))}
+                  className={`p-3.5 rounded-xl border transition-all cursor-pointer ${
+                    bookConfig.strategyFocus === 'BREAKOUT_MOMENTUM'
+                      ? 'bg-emerald-950/30 border-emerald-500/80 ring-1 ring-emerald-500/30'
+                      : 'bg-slate-900/60 border-slate-800 hover:border-slate-700'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-xs font-bold text-white">{t.strategyBreakout || 'Breakout Momentum'}</span>
+                    <span className="text-[10px] text-emerald-400 font-mono">Dynamic Res</span>
+                  </div>
+                  <p className="text-[11px] text-slate-300 leading-normal">
+                    {isEn ? 'Strong Long continuation through key resistance levels with high volume.' : 'Sinyal Strong Long penembusan level resistance EMA dengan lonjakan volume.'}
+                  </p>
                 </div>
-                <p className="text-[11px] text-slate-300 leading-normal">
-                  {isEn ? 'Strong Long continuation through key resistance levels with high volume.' : 'Sinyal Strong Long penembusan level resistance EMA dengan lonjakan volume.'}
-                </p>
-              </div>
 
-              {/* Oversold Bounce */}
-              <div
-                onClick={() => setBookConfig((prev) => ({ ...prev, strategyFocus: 'OVERSOLD_BOUNCE' }))}
-                className={`p-3.5 rounded-xl border transition-all cursor-pointer ${
-                  bookConfig.strategyFocus === 'OVERSOLD_BOUNCE'
-                    ? 'bg-rose-950/30 border-rose-500/80 ring-1 ring-rose-500/30'
-                    : 'bg-slate-900/60 border-slate-800 hover:border-slate-700'
-                }`}
-              >
-                <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-xs font-bold text-white">{t.strategyOversold || 'Oversold Dip'}</span>
-                  <span className="text-[10px] text-rose-400 font-mono">Buy On Dip</span>
+                {/* Oversold Bounce */}
+                <div
+                  onClick={() => setBookConfig((prev) => ({ ...prev, strategyFocus: 'OVERSOLD_BOUNCE' }))}
+                  className={`p-3.5 rounded-xl border transition-all cursor-pointer ${
+                    bookConfig.strategyFocus === 'OVERSOLD_BOUNCE'
+                      ? 'bg-rose-950/30 border-rose-500/80 ring-1 ring-rose-500/30'
+                      : 'bg-slate-900/60 border-slate-800 hover:border-slate-700'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-xs font-bold text-white">{t.strategyOversold || 'Oversold Dip'}</span>
+                    <span className="text-[10px] text-rose-400 font-mono">Buy On Dip</span>
+                  </div>
+                  <p className="text-[11px] text-slate-300 leading-normal">
+                    {isEn ? 'Mean-reversion setups on deeply discounted RSI support levels.' : 'Peluang akumulasi di lembah diskon saat indikator RSI menyentuh oversold.'}
+                  </p>
                 </div>
-                <p className="text-[11px] text-slate-300 leading-normal">
-                  {isEn ? 'Mean-reversion setups on deeply discounted RSI support levels.' : 'Peluang akumulasi di lembah diskon saat indikator RSI menyentuh oversold.'}
-                </p>
               </div>
-            </div>
+            )}
           </div>
 
           {/* Section 3: Sizing Model & Risk Management Parameters */}
@@ -2843,123 +3032,261 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
 
             {/* Core Numerical Parameters */}
             <div className="bg-[#0b1322] border border-slate-800 rounded-2xl p-6 shadow-sm space-y-4">
-              <div className="border-b border-slate-800 pb-3">
-                <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                  <ShieldCheck className="w-4 h-4 text-emerald-400" />
-                  <span>{isEn ? '4. Quantitative Risk Parameters' : '4. Parameter Batas Risiko'}</span>
-                </h3>
-                <span className="text-xs text-slate-400">
-                  {isEn ? 'Safety gating & threshold constraints for automated trade execution' : 'Batas pengaman dan kriteria kelayakan eksekusi posisi'}
-                </span>
+              <div className="border-b border-slate-800 pb-3 flex items-center justify-between">
+                <div>
+                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                    <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                    <span>{isEn ? '4. Quantitative Risk Parameters' : '4. Parameter Batas Risiko'}</span>
+                  </h3>
+                  <span className="text-xs text-slate-400">
+                    {isEn ? 'Safety gating & threshold constraints for automated trade execution' : 'Batas pengaman dan kriteria kelayakan eksekusi posisi'}
+                  </span>
+                </div>
+                {!isHybridMode && (
+                  <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-sky-500/15 text-sky-300 border border-sky-500/30">
+                    🔒 AI CONTROLLED
+                  </span>
+                )}
               </div>
 
-              <div className="space-y-4 text-xs">
-                {/* Max Concurrent Positions */}
-                <div>
-                  <div className="flex justify-between items-center mb-1.5">
-                    <span className="text-slate-300 font-semibold">{t.maxConcurrentPos}</span>
-                    <strong className="text-sky-400 font-mono">{bookConfig.maxConcurrentPositions} Slots</strong>
+              {!isHybridMode ? (
+                /* Pure AI: Locked / Calibrated Quantitative Gating */
+                <div className="space-y-3.5 text-xs">
+                  <div className="p-3.5 rounded-xl bg-slate-900/80 border border-slate-800 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-300 font-semibold">{t.maxConcurrentPos}</span>
+                      <strong className="text-sky-400 font-mono text-sm">4 Slots (Diversified)</strong>
+                    </div>
+                    <div className="flex items-center justify-between text-slate-400 text-[11px]">
+                      <span>{isEn ? 'Algorithm limit' : 'Batas algoritma'}</span>
+                      <span className="text-sky-300/80 font-mono">Kelly optimal 4 max</span>
+                    </div>
                   </div>
-                  <div className="grid grid-cols-4 gap-2">
-                    {[2, 4, 6, 8].map((slots) => (
-                      <button
-                        key={slots}
-                        type="button"
-                        onClick={() => setBookConfig((prev) => ({ ...prev, maxConcurrentPositions: slots }))}
-                        className={`py-1.5 rounded-lg font-mono font-bold transition-colors cursor-pointer border ${
-                          bookConfig.maxConcurrentPositions === slots
-                            ? 'bg-sky-500 text-slate-950 border-sky-400 shadow-sm'
-                            : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-white'
-                        }`}
-                      >
-                        {slots} Pos
-                      </button>
-                    ))}
-                  </div>
-                </div>
 
-                {/* Risk Per Trade (RPT %) — P0.6: hard cap PAPER 0.5% ekuitas ditegakkan risk engine */}
-                <div>
-                  <div className="flex justify-between items-center mb-1.5">
-                    <span className="text-slate-300 font-semibold">{t.riskPerTrade}</span>
-                    <strong className="text-amber-400 font-mono">
-                      {Math.min(bookConfig.riskPerTradePercent, 0.5)}%
-                      {bookConfig.riskPerTradePercent > 0.5 && (
-                        <span className="text-rose-400 text-[10px] ml-1">(cap 0.5%)</span>
-                      )}
-                    </strong>
+                  <div className="p-3.5 rounded-xl bg-slate-900/80 border border-slate-800 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-300 font-semibold">{t.riskPerTrade}</span>
+                      <strong className="text-amber-400 font-mono text-sm">0.50% Equity / Trade</strong>
+                    </div>
+                    <div className="flex items-center justify-between text-slate-400 text-[11px]">
+                      <span>{isEn ? 'Stop distance sizing' : 'Sizing jarak stop'}</span>
+                      <span className="text-amber-300/80 font-mono">Strict capital protection</span>
+                    </div>
                   </div>
-                  <div className="grid grid-cols-4 gap-2">
-                    {[0.25, 0.5, 0.75, 1.0].map((rpt) => (
-                      <button
-                        key={rpt}
-                        type="button"
-                        onClick={() => setBookConfig((prev) => ({ ...prev, riskPerTradePercent: rpt }))}
-                        className={`py-1.5 rounded-lg font-mono font-bold transition-colors cursor-pointer border ${
-                          bookConfig.riskPerTradePercent === rpt
-                            ? 'bg-amber-500 text-slate-950 border-amber-400 shadow-sm'
-                            : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-white'
-                        }`}
-                      >
-                        {rpt}%
-                      </button>
-                    ))}
+
+                  <div className="p-3.5 rounded-xl bg-slate-900/80 border border-slate-800 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-300 font-semibold">{t.minRrFilter}</span>
+                      <strong className="text-emerald-400 font-mono text-sm">1:2.0 Minimum</strong>
+                    </div>
+                    <div className="flex items-center justify-between text-slate-400 text-[11px]">
+                      <span>{isEn ? 'Asymmetric payoff filter' : 'Filter payoff asimetris'}</span>
+                      <span className="text-emerald-300/80 font-mono">Reward ≥ 2x Risk</span>
+                    </div>
                   </div>
-                  <p className="text-[10px] text-slate-500 mt-1">
+
+                  <div className="p-3.5 rounded-xl bg-slate-900/80 border border-slate-800 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-300 font-semibold">{t.minAiConfidence}</span>
+                      <strong className="text-purple-400 font-mono text-sm">75% Quality Threshold</strong>
+                    </div>
+                    <div className="flex items-center justify-between text-slate-400 text-[11px]">
+                      <span>{isEn ? 'Neural Alpha score' : 'Skor Alpha neural'}</span>
+                      <span className="text-purple-300/80 font-mono">High-conviction setups only</span>
+                    </div>
+                  </div>
+
+                  <p className="text-[11px] text-slate-400 leading-relaxed pt-1">
                     {isEn
-                      ? 'Risk = stop-distance from actual entry, capped at 0.5% equity (PAPER default). Not % of notional.'
-                      : 'Risiko = jarak stop dari entry aktual, cap 0,5% ekuitas (default PAPER). Bukan % notional.'}
+                      ? 'Note: In Pure AI mode, all risk parameters are locked to Halfy AI’s mathematical standards for fair Battle Arena benchmarking. Custom sliders and manual numeric entries are unlocked in Hybrid AI Bot mode.'
+                      : 'Catatan: Pada mode Pure AI, seluruh parameter risiko terkunci pada standar matematis Halfy AI demi integritas Battle Arena. Pengaturan manual dan input angka bebas tersedia di mode Bot Hybrid AI.'}
                   </p>
                 </div>
-
-                {/* Min Risk to Reward Filter */}
-                <div>
-                  <div className="flex justify-between items-center mb-1.5">
-                    <span className="text-slate-300 font-semibold">{t.minRrFilter}</span>
-                    <strong className="text-emerald-400 font-mono">1:{bookConfig.minRiskReward}.0</strong>
+              ) : (
+                /* Hybrid AI: Interactive with quick buttons PLUS manual number inputs */
+                <div className="space-y-4 text-xs">
+                  {/* Max Concurrent Positions */}
+                  <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2.5">
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-300 font-semibold">{t.maxConcurrentPos}</span>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-slate-400 text-[11px]">{isEn ? 'Current:' : 'Saat ini:'}</span>
+                        <strong className="text-sky-400 font-mono text-sm">{bookConfig.maxConcurrentPositions} Slots</strong>
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {[2, 4, 6, 8].map((slots) => (
+                        <button
+                          key={slots}
+                          type="button"
+                          onClick={() => setBookConfig((prev) => ({ ...prev, maxConcurrentPositions: slots }))}
+                          className={`px-3 py-1.5 rounded-lg font-mono font-bold transition-colors cursor-pointer border ${
+                            bookConfig.maxConcurrentPositions === slots
+                              ? 'bg-sky-500 text-slate-950 border-sky-400 shadow-sm'
+                              : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-white'
+                          }`}
+                        >
+                          {slots} Pos
+                        </button>
+                      ))}
+                      <div className="flex items-center gap-1.5 ml-auto">
+                        <span className="text-[11px] text-slate-400">{isEn ? 'Custom:' : 'Manual:'}</span>
+                        <input
+                          type="number"
+                          min="1"
+                          max="25"
+                          step="1"
+                          value={bookConfig.maxConcurrentPositions}
+                          onChange={(e) => {
+                            const val = parseInt(e.target.value, 10);
+                            if (!isNaN(val)) {
+                              setBookConfig((prev) => ({ ...prev, maxConcurrentPositions: Math.max(1, Math.min(25, val)) }));
+                            }
+                          }}
+                          className="w-16 px-2 py-1 bg-slate-950 border border-slate-700 rounded-lg text-white font-mono text-xs text-center focus:border-sky-400 focus:outline-none"
+                        />
+                      </div>
+                    </div>
                   </div>
-                  <div className="grid grid-cols-4 gap-2">
-                    {[1.5, 2.0, 2.5, 3.0].map((rr) => (
-                      <button
-                        key={rr}
-                        type="button"
-                        onClick={() => setBookConfig((prev) => ({ ...prev, minRiskReward: rr }))}
-                        className={`py-1.5 rounded-lg font-mono font-bold transition-colors cursor-pointer border ${
-                          bookConfig.minRiskReward === rr
-                            ? 'bg-emerald-500 text-slate-950 border-emerald-400 shadow-sm'
-                            : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-white'
-                        }`}
-                      >
-                        1:{rr}
-                      </button>
-                    ))}
+
+                  {/* Risk Per Trade (RPT %) */}
+                  <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2.5">
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-300 font-semibold">{t.riskPerTrade}</span>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-slate-400 text-[11px]">{isEn ? 'Current:' : 'Saat ini:'}</span>
+                        <strong className="text-amber-400 font-mono text-sm">{bookConfig.riskPerTradePercent}%</strong>
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {[0.25, 0.5, 1.0, 2.0].map((rpt) => (
+                        <button
+                          key={rpt}
+                          type="button"
+                          onClick={() => setBookConfig((prev) => ({ ...prev, riskPerTradePercent: rpt }))}
+                          className={`px-3 py-1.5 rounded-lg font-mono font-bold transition-colors cursor-pointer border ${
+                            bookConfig.riskPerTradePercent === rpt
+                              ? 'bg-amber-500 text-slate-950 border-amber-400 shadow-sm'
+                              : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-white'
+                          }`}
+                        >
+                          {rpt}%
+                        </button>
+                      ))}
+                      <div className="flex items-center gap-1.5 ml-auto">
+                        <span className="text-[11px] text-slate-400">{isEn ? 'Custom %:' : 'Manual %:'}</span>
+                        <input
+                          type="number"
+                          min="0.05"
+                          max="10.0"
+                          step="0.05"
+                          value={bookConfig.riskPerTradePercent}
+                          onChange={(e) => {
+                            const val = parseFloat(e.target.value);
+                            if (!isNaN(val)) {
+                              setBookConfig((prev) => ({ ...prev, riskPerTradePercent: Math.max(0.05, Math.min(10, val)) }));
+                            }
+                          }}
+                          className="w-16 px-2 py-1 bg-slate-950 border border-slate-700 rounded-lg text-white font-mono text-xs text-center focus:border-amber-400 focus:outline-none"
+                        />
+                      </div>
+                    </div>
+                    <p className="text-[10px] text-slate-400">
+                      {isEn
+                        ? 'Position risk is calculated from exact distance between entry and stop loss. Allows flexible custom risk allocation.'
+                        : 'Risiko posisi dihitung dari jarak pasti antara harga entry dan stop loss. Mendukung alokasi risiko bebas sesuai toleransi Anda.'}
+                    </p>
+                  </div>
+
+                  {/* Min Risk to Reward Filter */}
+                  <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2.5">
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-300 font-semibold">{t.minRrFilter}</span>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-slate-400 text-[11px]">{isEn ? 'Current:' : 'Saat ini:'}</span>
+                        <strong className="text-emerald-400 font-mono text-sm">1:{bookConfig.minRiskReward}</strong>
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {[1.5, 2.0, 2.5, 3.0].map((rr) => (
+                        <button
+                          key={rr}
+                          type="button"
+                          onClick={() => setBookConfig((prev) => ({ ...prev, minRiskReward: rr }))}
+                          className={`px-3 py-1.5 rounded-lg font-mono font-bold transition-colors cursor-pointer border ${
+                            bookConfig.minRiskReward === rr
+                              ? 'bg-emerald-500 text-slate-950 border-emerald-400 shadow-sm'
+                              : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-white'
+                          }`}
+                        >
+                          1:{rr}
+                        </button>
+                      ))}
+                      <div className="flex items-center gap-1.5 ml-auto">
+                        <span className="text-[11px] text-slate-400">{isEn ? 'Custom R:R:' : 'Manual R:R:'}</span>
+                        <input
+                          type="number"
+                          min="1.0"
+                          max="10.0"
+                          step="0.1"
+                          value={bookConfig.minRiskReward}
+                          onChange={(e) => {
+                            const val = parseFloat(e.target.value);
+                            if (!isNaN(val)) {
+                              setBookConfig((prev) => ({ ...prev, minRiskReward: Math.max(1.0, Math.min(10, val)) }));
+                            }
+                          }}
+                          className="w-16 px-2 py-1 bg-slate-950 border border-slate-700 rounded-lg text-white font-mono text-xs text-center focus:border-emerald-400 focus:outline-none"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Min AI Confidence Score */}
+                  <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2.5">
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-300 font-semibold">{t.minAiConfidence}</span>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-slate-400 text-[11px]">{isEn ? 'Current:' : 'Saat ini:'}</span>
+                        <strong className="text-purple-400 font-mono text-sm">{bookConfig.minAiConfidence}%</strong>
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {[65, 70, 75, 80, 85].map((conf) => (
+                        <button
+                          key={conf}
+                          type="button"
+                          onClick={() => setBookConfig((prev) => ({ ...prev, minAiConfidence: conf }))}
+                          className={`px-3 py-1.5 rounded-lg font-mono font-bold transition-colors cursor-pointer border ${
+                            bookConfig.minAiConfidence === conf
+                              ? 'bg-purple-600 text-white border-purple-400 shadow-sm'
+                              : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-white'
+                          }`}
+                        >
+                          {conf}%
+                        </button>
+                      ))}
+                      <div className="flex items-center gap-1.5 ml-auto">
+                        <span className="text-[11px] text-slate-400">{isEn ? 'Custom Score:' : 'Manual Skor:'}</span>
+                        <input
+                          type="number"
+                          min="50"
+                          max="99"
+                          step="1"
+                          value={bookConfig.minAiConfidence}
+                          onChange={(e) => {
+                            const val = parseInt(e.target.value, 10);
+                            if (!isNaN(val)) {
+                              setBookConfig((prev) => ({ ...prev, minAiConfidence: Math.max(50, Math.min(99, val)) }));
+                            }
+                          }}
+                          className="w-16 px-2 py-1 bg-slate-950 border border-slate-700 rounded-lg text-white font-mono text-xs text-center focus:border-purple-400 focus:outline-none"
+                        />
+                      </div>
+                    </div>
                   </div>
                 </div>
-
-                {/* Min AI Confidence Score */}
-                <div>
-                  <div className="flex justify-between items-center mb-1.5">
-                    <span className="text-slate-300 font-semibold">{t.minAiConfidence}</span>
-                    <strong className="text-purple-400 font-mono">{bookConfig.minAiConfidence}%</strong>
-                  </div>
-                  <div className="grid grid-cols-4 gap-2">
-                    {[70, 75, 80, 85].map((conf) => (
-                      <button
-                        key={conf}
-                        type="button"
-                        onClick={() => setBookConfig((prev) => ({ ...prev, minAiConfidence: conf }))}
-                        className={`py-1.5 rounded-lg font-mono font-bold transition-colors cursor-pointer border ${
-                          bookConfig.minAiConfidence === conf
-                            ? 'bg-purple-600 text-white border-purple-400 shadow-sm'
-                            : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-white'
-                        }`}
-                      >
-                        {conf}%
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
+              )}
             </div>
           </div>
 
@@ -3108,7 +3435,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
             <div className="flex items-center gap-3 w-full sm:w-auto">
               <button
                 type="button"
-                onClick={() => scanCurrentBook(false)}
+                onClick={() => scanCurrentBook(false, true)}
                 disabled={isBotScanning}
                 className="px-4 py-2.5 rounded-xl text-xs font-bold bg-sky-500 hover:bg-sky-400 text-slate-950 transition-colors flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 w-full sm:w-auto"
               >
@@ -3118,15 +3445,31 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
 
               <button
                 type="button"
-                onClick={() => handleSaveBotSettings(bookConfig)}
+                onClick={() => {
+                  setShowBotSettingsPanel(false);
+                  if (portfolioMode === 'settings') setPortfolioMode(isHybridMode ? 'hybrid' : 'bot');
+                }}
+                className="px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-400 hover:text-white border border-slate-700 bg-slate-900 hover:bg-slate-800 transition-colors cursor-pointer w-full sm:w-auto"
+              >
+                <span>{isEn ? 'Close' : 'Tutup'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  handleSaveBotSettings(bookConfig);
+                  setShowBotSettingsPanel(false);
+                  if (portfolioMode === 'settings') setPortfolioMode(isHybridMode ? 'hybrid' : 'bot');
+                }}
                 className="px-5 py-2.5 rounded-xl text-xs font-bold bg-emerald-500 hover:bg-emerald-400 text-slate-950 transition-colors shadow-sm flex items-center justify-center gap-1.5 cursor-pointer w-full sm:w-auto"
               >
                 <Check className="w-4 h-4" />
-                <span>{t.saveSettingsBtn || (isEn ? 'Save Configuration' : 'Simpan Pengaturan')}</span>
+                <span>{t.saveSettingsBtn || (isEn ? 'Save & Apply' : 'Simpan & Terapkan')}</span>
               </button>
             </div>
           </div>
         </div>
+      </div>
       )}
 
       {/* =========================================================================
@@ -4168,8 +4511,19 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
             {/* Modal Header */}
             <div className="flex items-center justify-between border-b border-slate-800 pb-4 shrink-0">
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-sky-500/15 border border-sky-500/30 flex items-center justify-center text-sky-400">
-                  <Bot className="w-5 h-5" />
+                <div
+                  className={`w-12 h-12 rounded-xl border flex items-center justify-center shrink-0 ${
+                    isHybridMode
+                      ? 'bg-purple-500/15 border-purple-500/40 text-purple-400'
+                      : 'bg-emerald-500/15 border-emerald-500/40 text-emerald-400'
+                  }`}
+                >
+                  <TradingRobotMascot
+                    variant={isHybridMode ? 'hybrid' : 'pure_ai'}
+                    state={isBotScanning ? 'scanning' : 'idle'}
+                    size="icon"
+                    isEn={isEn}
+                  />
                 </div>
                 <div>
                   <div className="flex items-center gap-2">
