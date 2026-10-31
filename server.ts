@@ -143,7 +143,14 @@ const universeNames = new Map<string, { name: string; marketCapB: number; circul
 const universeSignals = new Map<string, { technicals: TechnicalIndicators; aiSignal: AISignal; computedAt: number }>();
 let universeLastRefresh: number | null = null;
 
-function chunkArray<T>(arr: T[], size: number): T[][] {
+// Pembulatan significant-digits: aman untuk harga mikro (PEPE 0.0000049)
+   // maupun besar (BTC 77270.36) — pembulatan desimal-tetap meng-nol-kan harga mikro.
+   function roundSig(v: number, digits = 8): number {
+     if (!Number.isFinite(v) || v === 0) return 0;
+     return Number(v.toPrecision(digits));
+   }
+
+   function chunkArray<T>(arr: T[], size: number): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
   return out;
@@ -268,10 +275,10 @@ function deriveSignal(technicals: TechnicalIndicators, price: number, atr: numbe
   else if (technicals.rsi14 > 78) action = 'Take Profit';
 
   const confidence = Math.max(40, Math.min(92, score));
-  const entryLow = Math.round(price * 995) / 1000;
-  const target1 = Math.round((price + 1.8 * atr) * 100) / 100;
-  const target2 = Math.round((price + 3.2 * atr) * 100) / 100;
-  const stopLoss = Math.round(Math.max(price - 1.2 * atr, technicals.supportLevel * 0.985) * 100) / 100;
+  const entryLow = roundSig(price * 0.995);
+  const target1 = roundSig(price + 1.8 * atr);
+  const target2 = roundSig(price + 3.2 * atr);
+  const stopLoss = roundSig(Math.max(price - 1.2 * atr, technicals.supportLevel * 0.985));
   const risk = Math.max(price - stopLoss, price * 0.01);
   const riskRewardRatio = Math.round(((target1 - price) / risk) * 10) / 10;
 
@@ -286,7 +293,7 @@ function deriveSignal(technicals: TechnicalIndicators, price: number, atr: numbe
     stopLoss,
     riskRewardRatio,
     timestamp: new Date().toISOString(),
-    thesis: `Sinyal teknikal dihitung LIVE dari klines harian Binance: RSI14 ${technicals.rsi14}, harga ${maText} ($${price.toLocaleString()} vs MA20 $${Math.round(technicals.ma20).toLocaleString()}), ${trendText}, volume 24 jam ${volumeSpike.toFixed(2)}x rata-rata 20 hari. Target & stop-loss diturunkan dari ATR harian $${Math.round(atr).toLocaleString()}.`,
+    thesis: `Sinyal teknikal dihitung LIVE dari klines harian Binance: RSI14 ${technicals.rsi14}, harga ${maText} (${price.toLocaleString('en-US', { maximumSignificantDigits: 6 })} vs MA20 ${technicals.ma20.toLocaleString('en-US', { maximumSignificantDigits: 6 })}), ${trendText}, volume 24 jam ${volumeSpike.toFixed(2)}x rata-rata 20 hari. Target & stop-loss diturunkan dari ATR harian ${atr.toLocaleString('en-US', { maximumSignificantDigits: 3 })}.`,
     technicalScore: score,
     fundamentalScore: 50,
     bandarScore: 50,
@@ -328,17 +335,17 @@ async function computeUniverseSignal(sym: string) {
 
   const technicals: TechnicalIndicators = {
     rsi14,
-    macd: Math.round(macd * 100) / 100,
-    macdSignal: Math.round(macdSignal * 100) / 100,
-    macdHist: Math.round((macd - macdSignal) * 100) / 100,
-    ma20: Math.round(ma20 * 100) / 100,
-    ma50: Math.round(ma50 * 100) / 100,
-    ma200: Math.round(ma200 * 100) / 100,
-    bollingerUpper: Math.round((ma20 + 2 * std20) * 100) / 100,
-    bollingerLower: Math.round((ma20 - 2 * std20) * 100) / 100,
+    macd: roundSig(macd),
+    macdSignal: roundSig(macdSignal),
+    macdHist: roundSig(macd - macdSignal),
+    ma20: roundSig(ma20),
+    ma50: roundSig(ma50),
+    ma200: roundSig(ma200),
+    bollingerUpper: roundSig(ma20 + 2 * std20),
+    bollingerLower: roundSig(ma20 - 2 * std20),
     volumeSpikeRatio: Math.round(volumeSpike * 100) / 100,
-    supportLevel: Math.round(Math.min(...lows.slice(-14)) * 100) / 100,
-    resistanceLevel: Math.round(Math.max(...highs.slice(-14)) * 100) / 100,
+    supportLevel: roundSig(Math.min(...lows.slice(-14))),
+    resistanceLevel: roundSig(Math.max(...highs.slice(-14))),
   };
   universeSignals.set(sym, {
     technicals,
@@ -348,7 +355,10 @@ async function computeUniverseSignal(sym: string) {
 }
 
 async function refreshUniverseSignals() {
-  const targets = universeSymbols.filter((s) => !CURATED_SYMBOLS.includes(s));
+  // HAC-28 fix — sinyal LIVE untuk SEMUA koin (termasuk 18 koin kurasi):
+  // dulu koin kurasi memakai aiSignal statis dari database (Entry Zone/SL beku),
+  // yang menyebabkan Entry Zone jauh dari harga pasar & stop geometry invalid.
+  const targets = Array.from(new Set([...CURATED_SYMBOLS, ...universeSymbols]));
   for (const batch of chunkArray(targets, 8)) {
     await Promise.all(batch.map((s) => computeUniverseSignal(s).catch(() => undefined)));
   }
@@ -503,11 +513,23 @@ function buildExtendedStock(sym: string): Stock | null {
 }
 
 function getMergedUniverse(): Stock[] {
+  // HAC-28 fix — koin kurasi: metadata kaya (nama, sektor, bandarmology naratif)
+  // tetap, TAPI technicals + aiSignal dioverride hasil komputasi live dari klines
+  // bila tersedia. Sinyal beku dari database tidak lagi pernah tampil ke user.
+  const curated = STOCKS_DATABASE.map((s) => {
+    const sig = universeSignals.get(s.symbol);
+    if (!sig) return s;
+    return {
+      ...s,
+      technicals: sig.technicals,
+      aiSignal: sig.aiSignal,
+    };
+  });
   const extended = universeSymbols
     .filter((s) => !CURATED_SYMBOLS.includes(s))
     .map((s) => buildExtendedStock(s))
     .filter((s): s is Stock => s !== null);
-  return [...STOCKS_DATABASE, ...extended];
+  return [...curated, ...extended];
 }
 
 const BINANCE_SYMBOLS = [
@@ -834,11 +856,11 @@ function computeMovingAverages(candles: Array<{ close: number; ma20: number | st
   for (let i = 0; i < candles.length; i++) {
     if (i >= 19) {
       const slice20 = candles.slice(i - 19, i + 1);
-      candles[i].ma20 = Math.round((slice20.reduce((acc, c) => acc + c.close, 0) / 20) * 100) / 100;
+      candles[i].ma20 = roundSig(slice20.reduce((acc, c) => acc + c.close, 0) / 20);
     }
     if (i >= 49) {
       const slice50 = candles.slice(i - 49, i + 1);
-      candles[i].ma50 = Math.round((slice50.reduce((acc, c) => acc + c.close, 0) / 50) * 100) / 100;
+      candles[i].ma50 = roundSig(slice50.reduce((acc, c) => acc + c.close, 0) / 50);
     } else {
       candles[i].ma50 = candles[i].ma20 ? Number(candles[i].ma20) * 0.98 : candles[i].close * 0.98;
     }
