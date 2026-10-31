@@ -7,6 +7,12 @@ export interface MarketSummaryResponse {
     IDX: string;
     US: string;
   };
+  binance?: {
+    connected: boolean;
+    lastSync: number | null;
+    source: string | null;
+    lastError?: string | null;
+  };
   topGainers: Stock[];
   topSignals: Stock[];
 }
@@ -171,6 +177,10 @@ export async function fetchMarketCondition(market: 'IDX' | 'US' = 'IDX'): Promis
   return res.json();
 }
 
+// Mirror publik Binance khusus data pasar — api.binance.com diblokir di
+// sebagian jaringan (mis. Indonesia), jadi coba mirror dulu lalu fallback.
+const BINANCE_PUBLIC_BASES = ['https://data-api.binance.vision', 'https://api.binance.com'];
+
 export async function syncDirectBinancePrices(stocks: Stock[]): Promise<Stock[]> {
   try {
     const symbols = [
@@ -178,9 +188,7 @@ export async function syncDirectBinancePrices(stocks: Stock[]): Promise<Stock[]>
       'DOGEUSDT', 'ADAUSDT', 'AVAXUSDT', 'SUIUSDT', 'LINKUSDT',
       'NEARUSDT', 'PEPEUSDT', 'RENDERUSDT', 'INJUSDT', 'TIAUSDT'
     ];
-    const res = await fetch(`https://api.binance.com/api/v3/ticker/24hr?symbols=${encodeURIComponent(JSON.stringify(symbols))}`);
-    if (!res.ok) return stocks;
-    const tickerList: Array<{
+    let tickerList: Array<{
       symbol: string;
       lastPrice: string;
       priceChange: string;
@@ -188,7 +196,19 @@ export async function syncDirectBinancePrices(stocks: Stock[]): Promise<Stock[]>
       highPrice: string;
       lowPrice: string;
       quoteVolume: string;
-    }> = await res.json();
+    }> | null = null;
+    for (const base of BINANCE_PUBLIC_BASES) {
+      try {
+        const res = await fetch(`${base}/api/v3/ticker/24hr?symbols=${encodeURIComponent(JSON.stringify(symbols))}`);
+        if (res.ok) {
+          tickerList = await res.json();
+          break;
+        }
+      } catch {
+        // coba base berikutnya
+      }
+    }
+    if (!tickerList) return stocks;
 
     const priceMap = new Map(tickerList.map((t) => [t.symbol.replace('USDT', ''), t]));
     return stocks.map((s) => {

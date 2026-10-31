@@ -4,10 +4,12 @@ export const INITIAL_BOT_CONFIG: BotConfig = {
   isActive: true,
   initialCapital: 50000,
   liquidityBalance: 32450.0,
-  riskPerTradePercent: 2.0, // 2% of total equity at risk per trade
+  // P0.6 — default PAPER konservatif sesuai brief: 0.5% risiko ekuitas per trade
+  // (2% of notional ≠ 2% risk of equity; sizing dihitung dari jarak stop).
+  riskPerTradePercent: 0.5,
   maxConcurrentPositions: 4,
   minRiskReward: 2.0, // Min 1:2.0 Risk to Reward
-  minAiConfidence: 75, // Min 75% AI Confidence
+  minAiConfidence: 75, // Min 75 Signal Quality (0-100) — BUKAN probabilitas win
   takeProfitMode: 'FULL_TP1',
   autoReinvest: true,
   archetype: 'AI_AUTONOMOUS',
@@ -16,6 +18,16 @@ export const INITIAL_BOT_CONFIG: BotConfig = {
   hybridRiskMultiplier: 1.0,
   hybridRequireConfirmation: false,
   trailingStopPercent: 2.5,
+  autoScanIntervalSec: 60,
+  entriesPaused: false,
+};
+
+// Buku Hybrid: engine sama, tapi archetype HYBRID + risk multiplier kalibrasi user.
+// Modal & kas awal disamakan dengan buku Pure AI agar Battle Arena adil.
+export const INITIAL_HYBRID_CONFIG: BotConfig = {
+  ...INITIAL_BOT_CONFIG,
+  archetype: 'HYBRID',
+  hybridRiskMultiplier: 1.25,
 };
 
 export const INITIAL_BOT_POSITIONS: PortfolioPosition[] = [

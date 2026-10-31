@@ -1,9 +1,9 @@
-import express, { Request, Response } from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
-import { Stock } from './src/types/stock';
+import { Stock, TechnicalIndicators, AISignal, MarketRegime } from './src/types/stock';
 import {
   MARKET_INDICES,
   STOCKS_DATABASE,
@@ -18,6 +18,46 @@ const app = express();
 const port = parseInt(process.env.PORT || '3000', 10);
 
 app.use(express.json());
+
+// ==========================================
+// HAC-2/HAC-3 — Server-side hardening
+// ==========================================
+// Rate limiting in-memory per IP (120 req/menit untuk /api/*) — tanpa dependency baru.
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX = 120;
+const rateBuckets = new Map<string, { count: number; windowStart: number }>();
+
+app.use('/api', (req: Request, res: Response, next: NextFunction) => {
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
+  const now = Date.now();
+  let bucket = rateBuckets.get(ip);
+  if (!bucket || now - bucket.windowStart >= RATE_LIMIT_WINDOW_MS) {
+    bucket = { count: 0, windowStart: now };
+    rateBuckets.set(ip, bucket);
+  }
+  bucket.count += 1;
+  // housekeeping: cegah Map tumbuh tanpa batas
+  if (rateBuckets.size > 1000) {
+    for (const [k, b] of rateBuckets) {
+      if (now - b.windowStart >= RATE_LIMIT_WINDOW_MS) rateBuckets.delete(k);
+    }
+  }
+  if (bucket.count > RATE_LIMIT_MAX) {
+    return res.status(429).json({ error: 'Too Many Requests — rate limit 120 req/min per IP.' });
+  }
+  next();
+});
+
+// Validator simbol ketat untuk semua parameter path (anti-injection/SSRF)
+const SYMBOL_PARAM_RE = /^[A-Z0-9]{1,10}$/;
+function requireValidSymbol(raw: string, res: Response): string | null {
+  const sym = String(raw || '').toUpperCase();
+  if (!SYMBOL_PARAM_RE.test(sym)) {
+    res.status(400).json({ error: `Simbol tidak valid: ${sym.slice(0, 12)}` });
+    return null;
+  }
+  return sym;
+}
 
 // Initialize Google Gemini Client with required aistudio-build User-Agent
 const apiKey = process.env.GEMINI_API_KEY || '';
@@ -35,6 +75,441 @@ const ai = apiKey
 // ==========================================
 // REAL-TIME BINANCE 24H API SYNC FOR CRYPTO
 // ==========================================
+// api.binance.com diblokir di sebagian jaringan (mis. Indonesia).
+// data-api.binance.vision adalah mirror resmi Binance khusus data pasar
+// dengan skema REST identik — jadi sumber utama, api.binance.com fallback.
+const BINANCE_BASES = ['https://data-api.binance.vision', 'https://api.binance.com'];
+let activeBinanceBase = BINANCE_BASES[0];
+
+interface BinanceSyncStatus {
+  connected: boolean;
+  lastSync: number | null;
+  source: string | null;
+  lastError: string | null;
+}
+const binanceStatus: BinanceSyncStatus = { connected: false, lastSync: null, source: null, lastError: null };
+
+async function fetchBinance(path: string, init?: RequestInit): Promise<globalThis.Response | null> {
+  // Coba base yang terakhir berhasil dulu, lalu sisanya sebagai fallback.
+  const ordered = [activeBinanceBase, ...BINANCE_BASES.filter((b) => b !== activeBinanceBase)];
+  for (const base of ordered) {
+    try {
+      const response = await fetch(base + path, {
+        ...init,
+        headers: { 'User-Agent': 'HalfyAI-CryptoTerminal/2.0', ...(init?.headers || {}) },
+      });
+      if (response.ok) {
+        activeBinanceBase = base;
+        return response;
+      }
+      binanceStatus.lastError = `${base}${path} -> HTTP ${response.status}`;
+    } catch (err) {
+      binanceStatus.lastError = `${base}${path} -> ${err instanceof Error ? err.message : 'network error'}`;
+    }
+  }
+  return null;
+}
+
+const CURATED_SYMBOLS = STOCKS_DATABASE.map((s) => s.symbol);
+
+// ==========================================
+// DYNAMIC UNIVERSE — TOP 100 BINANCE SPOT
+// ==========================================
+// Universe tidak lagi terbatas pada database statis: setiap 5 menit server
+// menemukan top N pasangan USDT berdasarkan volume nyata Binance, mengambil
+// nama & market cap dari CoinGecko, dan menghitung sinyal teknikal dari
+// klines harian ASLI. Koin kurasi (18) tetap di depan dengan metadata kaya.
+const UNIVERSE_SIZE = 100;
+const LEVERAGED_TOKEN_RE = /(UP|DOWN|BULL|BEAR)USDT$/;
+const EXCLUDED_SYMBOLS = new Set([
+  'USDC', 'FDUSD', 'TUSD', 'USDP', 'DAI', 'EUR', 'AEUR', 'USD1', 'XUSD', 'PAXG', 'USDS', 'BUSD',
+  'RLUSD', 'USDE', 'EURI', 'RWUSD', 'XAUT', 'U',
+]);
+// Hanya simbol alfanumerik standar — memblokir token branded/non-standar dari daftar volume
+const VALID_SYMBOL_RE = /^[A-Z0-9]{2,10}$/;
+
+interface LiveTicker {
+  lastPrice: number;
+  prevClose: number;
+  change: number;
+  changePercent: number;
+  dayHigh: number;
+  dayLow: number;
+  quoteVolume: number;
+}
+const extendedLive = new Map<string, LiveTicker>();
+let universeSymbols: string[] = [];
+const universeNames = new Map<string, { name: string; marketCapB: number; circulatingSupply?: string }>();
+const universeSignals = new Map<string, { technicals: TechnicalIndicators; aiSignal: AISignal; computedAt: number }>();
+let universeLastRefresh: number | null = null;
+
+function chunkArray<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+function parseTicker(raw: Record<string, string>): LiveTicker {
+  return {
+    lastPrice: parseFloat(raw.lastPrice),
+    prevClose: parseFloat(raw.prevClosePrice) || parseFloat(raw.lastPrice) - parseFloat(raw.priceChange),
+    change: parseFloat(raw.priceChange),
+    changePercent: parseFloat(raw.priceChangePercent),
+    dayHigh: parseFloat(raw.highPrice),
+    dayLow: parseFloat(raw.lowPrice),
+    quoteVolume: parseFloat(raw.quoteVolume),
+  };
+}
+
+async function fetchCoinGeckoMarkets(): Promise<Map<string, { name: string; marketCapB: number; circulatingSupply?: string }> | undefined> {
+  try {
+    const res = await fetch('https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page=1', {
+      headers: {
+        'User-Agent': 'HalfyAI-CryptoTerminal/2.0',
+        'Accept': 'application/json',
+      },
+    });
+    // undefined = CoinGecko tidak tersedia → fallback ke regex saja (jangan set kosong!)
+    if (!res.ok) return undefined;
+    const list: Array<{ symbol: string; name: string; market_cap: number; circulating_supply: number }> = await res.json();
+    if (!Array.isArray(list) || list.length === 0) return undefined;
+    const bySymbol = new Map<string, { name: string; marketCapB: number; circulatingSupply?: string }>();
+    for (const c of list) {
+      bySymbol.set(c.symbol.toUpperCase(), {
+        name: c.name,
+        marketCapB: Math.round((c.market_cap / 1e9) * 1000) / 1000,
+        circulatingSupply: c.circulating_supply
+          ? c.circulating_supply > 1e9
+            ? `${Math.round(c.circulating_supply / 1e9)}B`
+            : c.circulating_supply > 1e6
+            ? `${Math.round(c.circulating_supply / 1e6)}M`
+            : `${Math.round(c.circulating_supply)}`
+          : undefined,
+      });
+    }
+    return bySymbol;
+  } catch {
+    return undefined;
+  }
+}
+
+async function refreshUniverseSymbols(
+  coinGecko?: Map<string, { name: string; marketCapB: number; circulatingSupply?: string }>
+) {
+  const response = await fetchBinance('/api/v3/ticker/24hr');
+  if (!response) return;
+  const all: Array<{ symbol: string; quoteVolume: string }> = await response.json();
+  const validSymbols = coinGecko ? new Set(coinGecko.keys()) : undefined;
+  const usdtPairs = all.filter((t) => {
+    const base = t.symbol.replace(/USDT$/, '');
+    return (
+      t.symbol.endsWith('USDT') &&
+      !LEVERAGED_TOKEN_RE.test(t.symbol) &&
+      !EXCLUDED_SYMBOLS.has(base) &&
+      VALID_SYMBOL_RE.test(base) &&
+      // Bila daftar CoinGecko tersedia, hanya simbol yang dikenalnya — memblokir
+      // tokenized stocks/branded tokens (TSLAB, NVDAB, SPYB, ...) yang ditolak batch API
+      (!validSymbols || validSymbols.has(base))
+    );
+  });
+  usdtPairs.sort((a, b) => parseFloat(b.quoteVolume) - parseFloat(a.quoteVolume));
+  universeSymbols = usdtPairs.slice(0, UNIVERSE_SIZE).map((t) => t.symbol.replace(/USDT$/, ''));
+  for (const t of usdtPairs.slice(0, UNIVERSE_SIZE)) {
+    const base = t.symbol.replace(/USDT$/, '');
+    // Nama & market cap langsung dari map CoinGecko yang sama
+    const meta = coinGecko?.get(base);
+    if (meta) universeNames.set(base, meta);
+    if (!extendedLive.has(base)) {
+      try { extendedLive.set(base, parseTicker(t as unknown as Record<string, string>)); } catch { /* skip malformed */ }
+    }
+  }
+}
+
+// ---------- Perhitungan indikator teknikal dari klines harian asli ----------
+function ema(values: number[], period: number): number[] {
+  const k = 2 / (period + 1);
+  const out: number[] = [values[0]];
+  for (let i = 1; i < values.length; i++) out.push(values[i] * k + out[i - 1] * (1 - k));
+  return out;
+}
+
+function computeRsi(closes: number[], period = 14): number {
+  let gains = 0, losses = 0;
+  for (let i = 1; i <= period; i++) {
+    const d = closes[i] - closes[i - 1];
+    if (d >= 0) gains += d; else losses -= d;
+  }
+  let avgGain = gains / period, avgLoss = losses / period;
+  for (let i = period + 1; i < closes.length; i++) {
+    const d = closes[i] - closes[i - 1];
+    avgGain = (avgGain * (period - 1) + Math.max(d, 0)) / period;
+    avgLoss = (avgLoss * (period - 1) + Math.max(-d, 0)) / period;
+  }
+  if (avgLoss === 0) return 100;
+  return Math.round((100 - 100 / (1 + avgGain / avgLoss)) * 10) / 10;
+}
+
+function deriveSignal(technicals: TechnicalIndicators, price: number, atr: number, volumeSpike: number): AISignal {
+  // Rule-based & transparan: skor dari posisi tren (MA), momentum (RSI), dan konfirmasi volume.
+  let score = 50;
+  if (price > technicals.ma20) score += 10;
+  if (technicals.ma20 > technicals.ma50) score += 10;
+  if (price > technicals.ma50) score += 6;
+  if (technicals.rsi14 >= 45 && technicals.rsi14 <= 65) score += 8;
+  else if (technicals.rsi14 > 65 && technicals.rsi14 <= 75) score += 4;
+  else if (technicals.rsi14 > 78) score -= 12;
+  else if (technicals.rsi14 < 35) score += 6;
+  if (volumeSpike > 1.5) score += 6;
+  score = Math.max(20, Math.min(95, Math.round(score)));
+
+  let action: AISignal['action'] = 'Neutral / Range';
+  if (score >= 72 && technicals.rsi14 < 76) action = 'Strong Long';
+  else if (score >= 60) action = 'Long (Buy on Dip)';
+  else if (technicals.rsi14 > 78) action = 'Take Profit';
+
+  const confidence = Math.max(40, Math.min(92, score));
+  const entryLow = Math.round(price * 995) / 1000;
+  const target1 = Math.round((price + 1.8 * atr) * 100) / 100;
+  const target2 = Math.round((price + 3.2 * atr) * 100) / 100;
+  const stopLoss = Math.round(Math.max(price - 1.2 * atr, technicals.supportLevel * 0.985) * 100) / 100;
+  const risk = Math.max(price - stopLoss, price * 0.01);
+  const riskRewardRatio = Math.round(((target1 - price) / risk) * 10) / 10;
+
+  const maText = price > technicals.ma20 ? 'di atas MA20' : 'di bawah MA20';
+  const trendText = technicals.ma20 > technicals.ma50 ? 'tren jangka menengah bullish' : 'tren jangka menengah bearish';
+  return {
+    action,
+    confidenceScore: confidence,
+    entryPriceRange: [entryLow, price],
+    targetPrice1: target1,
+    targetPrice2: target2,
+    stopLoss,
+    riskRewardRatio,
+    timestamp: new Date().toISOString(),
+    thesis: `Sinyal teknikal dihitung LIVE dari klines harian Binance: RSI14 ${technicals.rsi14}, harga ${maText} ($${price.toLocaleString()} vs MA20 $${Math.round(technicals.ma20).toLocaleString()}), ${trendText}, volume 24 jam ${volumeSpike.toFixed(2)}x rata-rata 20 hari. Target & stop-loss diturunkan dari ATR harian $${Math.round(atr).toLocaleString()}.`,
+    technicalScore: score,
+    fundamentalScore: 50,
+    bandarScore: 50,
+    sentimentScore: 0,
+    liquidationRisk: technicals.rsi14 > 78 ? 'High' : technicals.rsi14 > 68 ? 'Moderate' : 'Low',
+  };
+}
+
+async function computeUniverseSignal(sym: string) {
+  const response = await fetchBinance(`/api/v3/klines?symbol=${sym}USDT&interval=1d&limit=60`);
+  if (!response) return;
+  type RawKline = [number, string, string, string, string, string, ...unknown[]];
+  const raw: RawKline[] = await response.json();
+  if (!Array.isArray(raw) || raw.length < 30) return;
+
+  const closes = raw.map((k) => parseFloat(k[4]));
+  const highs = raw.map((k) => parseFloat(k[2]));
+  const lows = raw.map((k) => parseFloat(k[3]));
+  const volumes = raw.map((k) => parseFloat(k[5]));
+  const price = closes[closes.length - 1];
+
+  const rsi14 = computeRsi(closes);
+  const e12 = ema(closes, 12), e26 = ema(closes, 26);
+  const macdLine = closes.map((_, i) => e12[i] - e26[i]);
+  const signalLine = ema(macdLine, 9);
+  const macd = macdLine[macdLine.length - 1];
+  const macdSignal = signalLine[signalLine.length - 1];
+
+  const ma = (arr: number[], n: number) => arr.slice(-n).reduce((a, b) => a + b, 0) / Math.min(n, arr.length);
+  const ma20 = ma(closes, 20), ma50 = ma(closes, 50), ma200 = ma(closes, Math.min(200, closes.length));
+  const std20 = Math.sqrt(closes.slice(-20).reduce((a, b) => a + (b - ma20) ** 2, 0) / 20);
+  const tr: number[] = [];
+  for (let i = 1; i < closes.length; i++) {
+    tr.push(Math.max(highs[i] - lows[i], Math.abs(highs[i] - closes[i - 1]), Math.abs(lows[i] - closes[i - 1])));
+  }
+  const atr = tr.slice(-14).reduce((a, b) => a + b, 0) / 14;
+  const avgVol20 = ma(volumes, 20);
+  const volumeSpike = avgVol20 > 0 ? volumes[volumes.length - 1] / avgVol20 : 1;
+
+  const technicals: TechnicalIndicators = {
+    rsi14,
+    macd: Math.round(macd * 100) / 100,
+    macdSignal: Math.round(macdSignal * 100) / 100,
+    macdHist: Math.round((macd - macdSignal) * 100) / 100,
+    ma20: Math.round(ma20 * 100) / 100,
+    ma50: Math.round(ma50 * 100) / 100,
+    ma200: Math.round(ma200 * 100) / 100,
+    bollingerUpper: Math.round((ma20 + 2 * std20) * 100) / 100,
+    bollingerLower: Math.round((ma20 - 2 * std20) * 100) / 100,
+    volumeSpikeRatio: Math.round(volumeSpike * 100) / 100,
+    supportLevel: Math.round(Math.min(...lows.slice(-14)) * 100) / 100,
+    resistanceLevel: Math.round(Math.max(...highs.slice(-14)) * 100) / 100,
+  };
+  universeSignals.set(sym, {
+    technicals,
+    aiSignal: deriveSignal(technicals, price, atr, volumeSpike),
+    computedAt: Date.now(),
+  });
+}
+
+async function refreshUniverseSignals() {
+  const targets = universeSymbols.filter((s) => !CURATED_SYMBOLS.includes(s));
+  for (const batch of chunkArray(targets, 8)) {
+    await Promise.all(batch.map((s) => computeUniverseSignal(s).catch(() => undefined)));
+  }
+  universeLastRefresh = Date.now();
+}
+
+// ==========================================
+// P1.2 — MARKET REGIME ENGINE
+// Regime explainable dari feed terverifikasi: tren BTC/ETH vs MA20 harian,
+// breadth universe (_Real_, dari ticker live), volatilitas BTC (ATR14/harga).
+// Dipakai sebagai ELIGIBILITY GATE strategi, bukan dekorasi.
+// ==========================================
+let marketRegime: MarketRegime | null = null;
+
+async function computeMarketRegime(): Promise<void> {
+  const reasons: string[] = [];
+  const feats: Record<string, { aboveMa20: boolean | null; atrPct: number | null }> = {
+    BTC: { aboveMa20: null, atrPct: null },
+    ETH: { aboveMa20: null, atrPct: null },
+  };
+  for (const sym of ['BTC', 'ETH']) {
+    try {
+      const res = await fetchBinance(`/api/v3/klines?symbol=${sym}USDT&interval=1d&limit=60`);
+      if (!res) continue;
+      type RawKline = [number, string, string, string, string, string, ...unknown[]];
+      const raw: RawKline[] = await res.json();
+      if (!Array.isArray(raw) || raw.length < 30) continue;
+      const closes = raw.map((k) => parseFloat(k[4]));
+      const highs = raw.map((k) => parseFloat(k[2]));
+      const lows = raw.map((k) => parseFloat(k[3]));
+      const price = closes[closes.length - 1];
+      const ma20 = closes.slice(-20).reduce((a, b) => a + b, 0) / 20;
+      const tr: number[] = [];
+      for (let i = 1; i < closes.length; i++) {
+        tr.push(Math.max(highs[i] - lows[i], Math.abs(highs[i] - closes[i - 1]), Math.abs(lows[i] - closes[i - 1])));
+      }
+      const atr = tr.slice(-14).reduce((a, b) => a + b, 0) / 14;
+      feats[sym] = { aboveMa20: price > ma20, atrPct: Math.round((atr / price) * 10000) / 100 };
+    } catch {
+      // fitur dilewati — jangan di-imputasi (P1.2: gracefully disable factors)
+    }
+  }
+
+  const tickers = Array.from(extendedLive.values());
+  const breadthPct = tickers.length > 0
+    ? Math.round((tickers.filter((t) => t.changePercent > 0).length / tickers.length) * 100)
+    : 50;
+
+  const btcUp = feats.BTC.aboveMa20;
+  const ethUp = feats.ETH.aboveMa20;
+  const btcAtr = feats.BTC.atrPct;
+
+  let state: MarketRegime['state'] = 'RANGE';
+  if (btcAtr != null && btcAtr > 8) {
+    state = 'HIGH_VOLATILITY';
+    reasons.push(`Volatilitas BTC ekstrem: ATR14 ${btcAtr}% dari harga`);
+  } else if (btcUp && ethUp && breadthPct >= 55) {
+    state = 'TREND_UP';
+    reasons.push(`BTC & ETH di atas MA20 harian; breadth ${breadthPct}% aset positif`);
+  } else if (btcUp === false && ethUp === false && breadthPct <= 45) {
+    state = 'TREND_DOWN';
+    reasons.push(`BTC & ETH di bawah MA20 harian; breadth ${breadthPct}% aset positif`);
+  } else {
+    state = 'RANGE';
+    reasons.push(`Sinyal tren campuran (breadth ${breadthPct}%; BTC ${btcUp == null ? 'n/a' : btcUp ? '> MA20' : '< MA20'}, ETH ${ethUp == null ? 'n/a' : ethUp ? '> MA20' : '< MA20'})`);
+  }
+
+  let quality: MarketRegime['quality'] = 'GOOD';
+  if (btcUp == null || (tickers.length === 0 && breadthPct === 50)) quality = 'POOR';
+  else if (ethUp == null || btcAtr == null) quality = 'PARTIAL';
+  if (quality !== 'POOR') reasons.push(`Kualitas data: ${quality} (feed ${tickers.length} ticker, BTC klines ${btcUp == null ? 'tidak tersedia' : 'tersedia'})`);
+
+  marketRegime = {
+    state, quality, reasons, breadthPct,
+    btcAboveMa20: btcUp, ethAboveMa20: ethUp, btcAtrPct: btcAtr,
+    updatedAt: Date.now(),
+  };
+}
+
+let universeJobRunning = false;
+async function universeJob() {
+  if (universeJobRunning) return;
+  universeJobRunning = true;
+  try {
+    // CoinGecko dulu: sekaligus sumber nama/market cap DAN filter keabsahan simbol
+    const coinGecko = await fetchCoinGeckoMarkets();
+    await refreshUniverseSymbols(coinGecko);
+    await refreshUniverseSignals();
+    await computeMarketRegime();
+  } finally {
+    universeJobRunning = false;
+  }
+}
+
+function buildExtendedStock(sym: string): Stock | null {
+  const live = extendedLive.get(sym);
+  if (!live || !live.lastPrice) return null;
+  const meta = universeNames.get(sym);
+  const sig = universeSignals.get(sym);
+  const technicals: TechnicalIndicators = sig?.technicals || {
+    rsi14: 50, macd: 0, macdSignal: 0, macdHist: 0,
+    ma20: live.lastPrice, ma50: live.lastPrice, ma200: live.lastPrice,
+    bollingerUpper: live.lastPrice * 1.04, bollingerLower: live.lastPrice * 0.96,
+    volumeSpikeRatio: 1, supportLevel: live.dayLow, resistanceLevel: live.dayHigh,
+  };
+  const aiSignal: AISignal = sig?.aiSignal || {
+    action: 'Neutral / Range',
+    confidenceScore: 50,
+    entryPriceRange: [live.lastPrice, live.lastPrice],
+    targetPrice1: live.lastPrice * 1.02,
+    targetPrice2: live.lastPrice * 1.04,
+    stopLoss: live.lastPrice * 0.98,
+    riskRewardRatio: 1,
+    timestamp: new Date().toISOString(),
+    thesis: 'Sinyal teknikal sedang dihitung dari klines harian Binance — tersedia dalam hitungan detik setelah server start.',
+    technicalScore: 50, fundamentalScore: 50, bandarScore: 50, sentimentScore: 0,
+  };
+  const price = live.lastPrice;
+  return {
+    symbol: sym,
+    tvSymbol: `BINANCE:${sym}USDT`,
+    name: meta?.name ? `${meta.name} (${sym} / USDT)` : `${sym} / USDT`,
+    market: 'CRYPTO',
+    sector: 'Broad Market · Top 100 Volume',
+    currency: 'USD',
+    currentPrice: price,
+    previousClose: live.prevClose || price - live.change,
+    change: Math.round(live.change * 100) / 100,
+    changePercent: Math.round(live.changePercent * 100) / 100,
+    dayHigh: live.dayHigh,
+    dayLow: live.dayLow,
+    volume: live.quoteVolume,
+    technicals,
+    fundamentals: {
+      pe: 0, pbv: 0, roe: 0, der: 0, dividendYield: 0,
+      marketCap: meta?.marketCapB ?? 0,
+      revenueGrowthYoY: 0,
+      circulatingSupply: meta?.circulatingSupply,
+    },
+    bandarmology: {
+      accumulationStatus: 'Neutral',
+      netForeignFlowToday: 0,
+      netForeignFlow5D: 0,
+      topBuyerBrokers: [],
+      topSellerBrokers: [],
+      foreignDominancePercent: 50,
+      bandarVolumeRatio: 1,
+    },
+    aiSignal,
+    recentNews: [],
+  };
+}
+
+function getMergedUniverse(): Stock[] {
+  const extended = universeSymbols
+    .filter((s) => !CURATED_SYMBOLS.includes(s))
+    .map((s) => buildExtendedStock(s))
+    .filter((s): s is Stock => s !== null);
+  return [...STOCKS_DATABASE, ...extended];
+}
+
 const BINANCE_SYMBOLS = [
   'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT',
   'DOGEUSDT', 'ADAUSDT', 'AVAXUSDT', 'SUIUSDT', 'LINKUSDT',
@@ -45,22 +520,43 @@ const BINANCE_SYMBOLS = [
 
 async function syncBinanceLivePrices() {
   try {
-    const symbolsParam = encodeURIComponent(JSON.stringify(BINANCE_SYMBOLS));
-    const response = await fetch(`https://api.binance.com/api/v3/ticker/24hr?symbols=${symbolsParam}`, {
-      headers: { 'User-Agent': 'HalfyAI-CryptoTerminal/2.0' },
-    });
-    if (!response.ok) return;
-
-    const data: Array<{
+    // Semua simbol yang dikenal sistem: kurasi (18, metadata kaya) + universe top 100.
+    // Binance membatasi ≤100 simbol per request `symbols`, jadi di-chunk.
+    const symbols = Array.from(new Set([...CURATED_SYMBOLS, ...universeSymbols]));
+    if (symbols.length === 0) return;
+    type TickerRow = {
       symbol: string;
       lastPrice: string;
+      prevClosePrice: string;
       priceChange: string;
       priceChangePercent: string;
       highPrice: string;
       lowPrice: string;
-      volume: string;
       quoteVolume: string;
-    }> = await response.json();
+    };
+    let data: TickerRow[] = [];
+    for (const chunk of chunkArray(symbols, 100)) {
+      const wanted = new Set(chunk.map((s) => `${s}USDT`));
+      let chunkData: TickerRow[] | null = null;
+      // Coba batch efisien dengan param symbols; bila ditolak (simbol tidak valid /
+      // jaringan berubah), fallback ke fetch penuh lalu filter lokal.
+      const symbolsParam = encodeURIComponent(JSON.stringify(chunk));
+      const response = await fetchBinance(`/api/v3/ticker/24hr?symbols=${symbolsParam}`);
+      if (response) {
+        chunkData = await response.json();
+      } else {
+        const full = await fetchBinance('/api/v3/ticker/24hr');
+        if (full) {
+          const allRows: TickerRow[] = await full.json();
+          chunkData = allRows.filter((r) => wanted.has(r.symbol));
+        }
+      }
+      if (!chunkData) {
+        binanceStatus.connected = false;
+        return;
+      }
+      data = data.concat(chunkData);
+    }
 
     for (const item of data) {
       const baseSymbol = item.symbol.replace('USDT', '');
@@ -76,7 +572,7 @@ async function syncBinanceLivePrices() {
         BASELINE_PRICES[baseSymbol].price = currentPrice;
       }
 
-      // Update in STOCKS_DATABASE
+      // Update in STOCKS_DATABASE (koin kurasi)
       const stock = STOCKS_DATABASE.find((s) => s.symbol === baseSymbol);
       if (stock) {
         stock.currentPrice = currentPrice;
@@ -86,10 +582,24 @@ async function syncBinanceLivePrices() {
         stock.dayLow = dayLow;
         stock.volume = volume;
       }
+
+      // Update live ticker koin extended universe
+      if (extendedLive.has(baseSymbol)) {
+        extendedLive.set(baseSymbol, {
+          lastPrice: currentPrice,
+          prevClose: parseFloat(item.prevClosePrice) || currentPrice - change,
+          change,
+          changePercent,
+          dayHigh,
+          dayLow,
+          quoteVolume: volume,
+        });
+      }
     }
 
-    // Dynamically update CRYPTO_MARKET_CONDITION movers based on live STOCKS_DATABASE
-    const positiveMovers = STOCKS_DATABASE.filter((s) => s.changePercent > 0)
+    // Movers dihitung dari seluruh merged universe (kurasi + extended)
+    const mergedForMovers = getMergedUniverse();
+    const positiveMovers = mergedForMovers.filter((s) => s.changePercent > 0)
       .sort((a, b) => b.changePercent - a.changePercent)
       .slice(0, 5);
     if (positiveMovers.length > 0) {
@@ -104,7 +614,7 @@ async function syncBinanceLivePrices() {
       }));
     }
 
-    const negativeMovers = STOCKS_DATABASE.filter((s) => s.changePercent < 0)
+    const negativeMovers = mergedForMovers.filter((s) => s.changePercent < 0)
       .sort((a, b) => a.changePercent - b.changePercent)
       .slice(0, 5);
     if (negativeMovers.length > 0) {
@@ -119,7 +629,7 @@ async function syncBinanceLivePrices() {
       }));
     }
 
-    const turnoverMovers = STOCKS_DATABASE.slice()
+    const turnoverMovers = mergedForMovers.slice()
       .sort((a, b) => b.volume - a.volume)
       .slice(0, 5);
     if (turnoverMovers.length > 0) {
@@ -133,8 +643,15 @@ async function syncBinanceLivePrices() {
         turnoverBillion: Math.round((s.volume / 1000000000) * 100) / 100,
       }));
     }
+
+    binanceStatus.connected = true;
+    binanceStatus.lastSync = Date.now();
+    binanceStatus.source = activeBinanceBase;
+    binanceStatus.lastError = null;
   } catch (err) {
-    // Keep local baseline on transient error
+    // Keep local baseline on transient error; surface status instead of failing silently
+    binanceStatus.connected = false;
+    binanceStatus.lastError = err instanceof Error ? err.message : 'unknown sync error';
   }
 }
 
@@ -142,7 +659,13 @@ async function syncBinanceLivePrices() {
 syncBinanceLivePrices();
 setInterval(syncBinanceLivePrices, 3000);
 
-// Helper to generate realistic OHLCV historical candle series
+// Universe discovery (top 100 by real volume) + names + live technical signals, every 5 minutes
+universeJob();
+setInterval(universeJob, 5 * 60 * 1000);
+
+// Helper to generate realistic OHLCV historical candle series (SIMULATED — hanya
+// dipakai sebagai fallback saat API klines asli tidak terjangkau; response
+// chart menandai field `simulated: true` agar UI tidak menampilkannya sebagai data pasar)
 function generateCandles(symbol: string, currentPrice: number, days = 45) {
   const candles = [];
   let price = currentPrice * (1 - days * 0.003);
@@ -205,10 +728,6 @@ function generateCandles(symbol: string, currentPrice: number, days = 45) {
   return candles;
 }
 
-function getDynamicStocks() {
-  return STOCKS_DATABASE;
-}
-
 function getDynamicIndices() {
   return MARKET_INDICES.map((idx) => {
     const microStep = (Math.random() - 0.48) * 0.05;
@@ -226,7 +745,7 @@ function getDynamicIndices() {
 
 // Market indices & pulse
 app.get('/api/market/summary', (_req: Request, res: Response) => {
-  const dynamicStocks = getDynamicStocks();
+  const mergedStocks = getMergedUniverse();
   const dynamicIndices = getDynamicIndices();
 
   res.json({
@@ -235,32 +754,36 @@ app.get('/api/market/summary', (_req: Request, res: Response) => {
     marketStatus: {
       CRYPTO: '24/7 Global Trading (Live Binance Sync)',
     },
-    topGainers: dynamicStocks.slice().sort((a, b) => b.changePercent - a.changePercent).slice(0, 5),
-    topSignals: dynamicStocks.filter((s) => s.aiSignal.action === 'Strong Long' || s.aiSignal.action === 'Long (Buy on Dip)'),
+    regime: marketRegime,
+    universe: {
+      total: mergedStocks.length,
+      curated: CURATED_SYMBOLS.length,
+      extended: mergedStocks.length - CURATED_SYMBOLS.length,
+      signalsRefreshedAt: universeLastRefresh,
+    },
+    binance: {
+      connected: binanceStatus.connected,
+      lastSync: binanceStatus.lastSync,
+      source: binanceStatus.source,
+      lastError: binanceStatus.lastError,
+    },
+    topGainers: mergedStocks.slice().sort((a, b) => b.changePercent - a.changePercent).slice(0, 5),
+    topSignals: mergedStocks.filter((s) => s.aiSignal.action === 'Strong Long' || s.aiSignal.action === 'Long (Buy on Dip)'),
   });
 });
 
 // Comprehensive market condition overview
-app.get('/api/market/condition', (_req: Request, res: Response) => {
-  const dynamicIndices = getDynamicIndices();
-
-  res.json({
-    ...CRYPTO_MARKET_CONDITION,
-    indices: dynamicIndices,
-    lastUpdated: new Date().toISOString(),
-  });
-});
-
-// All stocks / tokens
+// All stocks / tokens — merged universe: koin kurasi + top 100 volume Binance
 app.get('/api/market/stocks', (_req: Request, res: Response) => {
-  res.json(getDynamicStocks());
+  res.json(getMergedUniverse());
 });
 
 // Specific stock/token quote & detail
 app.get('/api/market/stocks/:symbol', (req: Request, res: Response) => {
-  const symbol = req.params.symbol.toUpperCase();
-  const dynamicStocks = getDynamicStocks();
-  const stock = dynamicStocks.find((s) => s.symbol === symbol);
+  const symbol = requireValidSymbol(req.params.symbol, res);
+  if (!symbol) return;
+  const mergedStocks = getMergedUniverse();
+  const stock = mergedStocks.find((s) => s.symbol === symbol);
   if (!stock) {
     return res.status(404).json({ error: `Asset symbol ${symbol} not found.` });
   }
@@ -270,11 +793,12 @@ app.get('/api/market/stocks/:symbol', (req: Request, res: Response) => {
 // Live price calibration endpoint
 app.post('/api/market/calibrate', (req: Request, res: Response) => {
   const { symbol, price } = req.body;
-  if (!symbol || typeof price !== 'number' || price <= 0) {
+  if (!symbol || typeof price !== 'number' || !Number.isFinite(price) || price <= 0) {
     return res.status(400).json({ error: 'Parameter symbol dan price (number > 0) wajib disertakan' });
   }
 
-  const sym = String(symbol).toUpperCase();
+  const sym = requireValidSymbol(symbol, res);
+  if (!sym) return;
   const base = BASELINE_PRICES[sym];
   if (!base) {
     return res.status(404).json({ error: `Simbol ${sym} tidak ditemukan dalam database.` });
@@ -287,8 +811,8 @@ app.post('/api/market/calibrate', (req: Request, res: Response) => {
     stock.currentPrice = price;
     stock.change = Math.round((price - stock.previousClose) * 100) / 100;
     stock.changePercent = Math.round((stock.change / stock.previousClose) * 10000) / 100;
-    stock.dayHigh = Math.max(stock.dayHigh, price);
-    stock.dayLow = Math.min(stock.dayLow, price);
+    // dayHigh/dayLow SENGAJA tidak diubah: kalibrasi adalah override harga manual,
+    // bukan pergerakan pasar — range 24 jam asli tidak boleh terkontaminasi.
   }
 
   res.json({
@@ -298,13 +822,83 @@ app.post('/api/market/calibrate', (req: Request, res: Response) => {
   });
 });
 
-// Candlestick historical chart data
-app.get('/api/market/chart/:symbol', (req: Request, res: Response) => {
-  const symbol = req.params.symbol.toUpperCase();
+// Candlestick historical chart data — dari klines ASLI Binance
+interface CandleCacheEntry {
+  data: Array<Record<string, number | string | boolean>>;
+  fetchedAt: number;
+}
+const candleCache = new Map<string, CandleCacheEntry>();
+const CANDLE_CACHE_TTL_MS = 60_000;
+
+function computeMovingAverages(candles: Array<{ close: number; ma20: number | string; ma50: number | string }>) {
+  for (let i = 0; i < candles.length; i++) {
+    if (i >= 19) {
+      const slice20 = candles.slice(i - 19, i + 1);
+      candles[i].ma20 = Math.round((slice20.reduce((acc, c) => acc + c.close, 0) / 20) * 100) / 100;
+    }
+    if (i >= 49) {
+      const slice50 = candles.slice(i - 49, i + 1);
+      candles[i].ma50 = Math.round((slice50.reduce((acc, c) => acc + c.close, 0) / 50) * 100) / 100;
+    } else {
+      candles[i].ma50 = candles[i].ma20 ? Number(candles[i].ma20) * 0.98 : candles[i].close * 0.98;
+    }
+  }
+}
+
+async function fetchRealCandles(symbol: string, days: number) {
+  // Simbol app (BTC, ETH, ...) dipetakan ke pasangan USDT di Binance spot
+  const pair = `${symbol}USDT`;
+  const limit = Math.min(Math.max(days + 1, 2), 1000);
+  const cacheKey = `${pair}:${limit}`;
+  const cached = candleCache.get(cacheKey);
+  if (cached && Date.now() - cached.fetchedAt < CANDLE_CACHE_TTL_MS) {
+    return { candles: cached.data, simulated: false as const };
+  }
+
+  const response = await fetchBinance(`/api/v3/klines?symbol=${pair}&interval=1d&limit=${limit}`);
+  if (!response) return null;
+
+  type RawKline = [number, string, string, string, string, string, ...unknown[]];
+  const raw: RawKline[] = await response.json();
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+
+  const candles = raw.map((k) => ({
+    time: new Date(k[0]).toISOString().split('T')[0],
+    open: parseFloat(k[1]),
+    high: parseFloat(k[2]),
+    low: parseFloat(k[3]),
+    close: parseFloat(k[4]),
+    volume: Math.round(parseFloat(k[5])),
+    ma20: 0,
+    ma50: 0,
+  }));
+  computeMovingAverages(candles);
+
+  const result = candles.map((c) => ({ ...c, simulated: false as const }));
+  candleCache.set(cacheKey, { data: result, fetchedAt: Date.now() });
+  return { candles: result, simulated: false as const };
+}
+
+app.get('/api/market/chart/:symbol', async (req: Request, res: Response) => {
+  const symbol = requireValidSymbol(req.params.symbol, res);
+  if (!symbol) return;
+  const days = Math.min(Math.max(parseInt((req.query.days as string) || '60', 10) || 60, 1), 365);
+
+  try {
+    const real = await fetchRealCandles(symbol, days);
+    if (real) {
+      return res.json(real.candles);
+    }
+  } catch {
+    // jatuh ke fallback simulasi di bawah
+  }
+
   const stock = STOCKS_DATABASE.find((s) => s.symbol === symbol);
   const price = stock ? stock.currentPrice : 100;
-  const days = parseInt((req.query.days as string) || '60', 10);
-  const data = generateCandles(symbol, price, days);
+  const data = generateCandles(symbol, price, Math.min(days, 45)).map((c) => ({
+    ...c,
+    simulated: true as const,
+  }));
   res.json(data);
 });
 
@@ -531,13 +1125,21 @@ function computeMathematicalQuantitativeAnalysis(asset: Stock, userNotes?: strin
 // Quantitative AI & Mathematical Synthesis Endpoint for Crypto Terminal
 app.post('/api/gemini/analyze', async (req: Request, res: Response) => {
   const { symbol, userNotes, engine = 'math' } = req.body;
-  if (!symbol) {
-    return res.status(400).json({ error: 'Asset symbol is required.' });
+  const sym = symbol ? requireValidSymbol(symbol, res) : null;
+  if (!sym) {
+    if (!res.headersSent) return res.status(400).json({ error: 'Asset symbol is required (1-10 alfanumerik).' });
+    return;
+  }
+  if (userNotes != null && (typeof userNotes !== 'string' || userNotes.length > 500)) {
+    return res.status(400).json({ error: 'userNotes wajib string <= 500 karakter.' });
+  }
+  if (engine !== 'math' && engine !== 'algorithmic' && engine !== 'gemini') {
+    return res.status(400).json({ error: "engine harus 'math' | 'algorithmic' | 'gemini'." });
   }
 
-  const asset = STOCKS_DATABASE.find((s) => s.symbol === symbol.toUpperCase());
+  const asset = getMergedUniverse().find((s) => s.symbol === sym);
   if (!asset) {
-    return res.status(404).json({ error: `Asset ${symbol} not found in database.` });
+    return res.status(404).json({ error: `Asset ${sym} not found in universe.` });
   }
 
   // If engine is 'math' or 'algorithmic' (default fast path, instant <5ms response):
@@ -624,20 +1226,6 @@ Berikan output persis dalam format JSON terstruktur berikut (tanpa markdown pemb
 
   // Instant fallback to mathematical quantitative engine
   return res.json(computeMathematicalQuantitativeAnalysis(asset, userNotes));
-});
-
-// System specification endpoint
-app.get('/api/docs/spec', (_req: Request, res: Response) => {
-  res.json({
-    title: 'Spesifikasi Arsitektur Sistem Halfy AI · Crypto & Equities Terminal',
-    version: '2.0.0-PRO',
-    architecture: {
-      backend: 'Node.js Express dengan feed Binance 24hr API streaming & TradingView real-time engine',
-      streaming: 'TradingView Real-time Widget feed & Binance sub-second ticker quotes',
-      aiModel: 'Gemini 3.8 Flash SDK (@google/genai) untuk sintesis kuantitatif multi-faktor',
-      security: 'Rate limiting 60 req/min, token isolation, zero client API key exposure',
-    },
-  });
 });
 
 // ==========================================

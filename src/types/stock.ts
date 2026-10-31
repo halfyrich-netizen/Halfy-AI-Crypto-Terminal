@@ -136,6 +136,10 @@ export interface PortfolioPosition {
   targetPrice?: number;
   stopLoss?: number;
   dateAdded: string;
+  // Archetype yang aktif saat posisi dibuka (untuk atribusi Battle Arena Manual/AI/Hybrid)
+  executedArchetype?: BotExecutionArchetype;
+  // P0.4 — setup lifecycle: setupId immutable per kualifikasi setup baru
+  setupId?: string;
 }
 
 export interface ClosedTradePosition {
@@ -154,7 +158,7 @@ export interface ClosedTradePosition {
   dateClosed: string;
   closeReason: 'TAKE_PROFIT' | 'STOP_LOSS' | 'MANUAL_EXIT';
   notes?: string;
-  executedBy?: 'MANUAL' | 'AI_BOT';
+  executedBy?: 'MANUAL' | 'AI_BOT' | 'HYBRID';
 }
 
 export type BotExecutionArchetype = 
@@ -174,6 +178,18 @@ export type BotStrategyFocus =
 
 export type BotSizingModel = 'KELLY_CRITERION' | 'FIXED_FRACTIONAL' | 'EQUAL_WEIGHT';
 
+// P1.2 — Market Regime (dihitung server dari feed terverifikasi; gate eligibility strategi)
+export interface MarketRegime {
+  state: 'TREND_UP' | 'TREND_DOWN' | 'RANGE' | 'HIGH_VOLATILITY';
+  quality: 'GOOD' | 'PARTIAL' | 'POOR';
+  reasons: string[];
+  breadthPct: number;
+  btcAboveMa20: boolean | null;
+  ethAboveMa20: boolean | null;
+  btcAtrPct: number | null;
+  updatedAt: number;
+}
+
 export interface BotConfig {
   isActive: boolean;
   initialCapital: number;
@@ -190,6 +206,11 @@ export interface BotConfig {
   hybridRiskMultiplier?: number;
   hybridRequireConfirmation?: boolean;
   trailingStopPercent?: number;
+  // Autopilot 24/7: scan otomatis tiap N detik saat bot aktif (0 = nonaktif).
+  // Berlaku untuk archetype PURE AI maupun HYBRID; mode Manual tidak terpengaruh.
+  autoScanIntervalSec?: number;
+  // P0.6 kill switch per buku: PAUSE_ENTRIES — TP/SL tetap dipantau, entry baru diblok.
+  entriesPaused?: boolean;
 }
 
 export interface BotExecutionLog {
