@@ -43,6 +43,8 @@ interface DashboardViewProps {
   lastUpdated?: Date | null;
   isRefreshing?: boolean;
   onManualRefresh?: () => void;
+  binanceConnected?: boolean | null;
+  binanceLastSync?: number | null;
   lang?: Language;
 }
 
@@ -59,6 +61,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   lastUpdated,
   isRefreshing = false,
   onManualRefresh,
+  binanceConnected = null,
+  binanceLastSync = null,
   lang = 'ID',
 }) => {
   const isEn = lang === 'EN';
@@ -387,16 +391,34 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
         </div>
 
-        {/* Binance Real-Time Spot Stream Status Ribbon */}
-        <div className="mt-4 px-3.5 py-2 rounded-xl bg-slate-900/80 border border-emerald-500/30 flex flex-wrap items-center justify-between text-xs font-mono gap-2">
+        {/* Binance Real-Time Spot Stream Status Ribbon — mencerminkan status koneksi nyata */}
+        <div className={`mt-4 px-3.5 py-2 rounded-xl border flex flex-wrap items-center justify-between text-xs font-mono gap-2 ${
+          binanceConnected === false
+            ? 'bg-rose-950/60 border-rose-500/40'
+            : 'bg-slate-900/80 border-emerald-500/30'
+        }`}>
           <div className="flex items-center gap-2">
-            <span className="relative flex h-2.5 w-2.5">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-              <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
-            </span>
-            <span className="text-emerald-400 font-bold uppercase tracking-wider text-[11px]">
-              {isEn ? 'Binance 24/7 Spot Stream: Connected' : 'Binance 24/7 Spot Stream: Terkoneksi Aktif'}
-            </span>
+            {binanceConnected === false ? (
+              <>
+                <span className="relative flex h-2.5 w-2.5">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-rose-500"></span>
+                </span>
+                <span className="text-rose-400 font-bold uppercase tracking-wider text-[11px]">
+                  {isEn ? 'Binance Stream: NOT SYNCED — showing static data' : 'Binance Stream: TIDAK TERSINKRON — menampilkan data statis'}
+                </span>
+              </>
+            ) : (
+              <>
+                <span className="relative flex h-2.5 w-2.5">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+                </span>
+                <span className="text-emerald-400 font-bold uppercase tracking-wider text-[11px]">
+                  {isEn ? 'Binance 24/7 Spot Stream: Connected' : 'Binance 24/7 Spot Stream: Terkoneksi Aktif'}
+                </span>
+              </>
+            )}
             <span className="text-slate-400 text-[11px] hidden sm:inline">•</span>
             <span className="text-slate-200 text-[11px]">
               BTC/USDT: <strong className="text-amber-400">{formatMoney(btcLivePrice)}</strong>
@@ -409,9 +431,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             <span>
               SOL/USDT: <strong className="text-white">{formatMoney(solLivePrice)}</strong>
             </span>
-            <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 text-[10px] font-bold">
-              LIVE 24H
-            </span>
+            {binanceConnected === false ? (
+              <span className="px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-400 border border-rose-500/30 text-[10px] font-bold">
+                {isEn ? 'STALE DATA' : 'DATA STATIS'}
+              </span>
+            ) : (
+              <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 text-[10px] font-bold">
+                LIVE 24H
+              </span>
+            )}
           </div>
         </div>
 

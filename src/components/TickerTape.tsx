@@ -42,10 +42,12 @@ export const TickerTape: React.FC<TickerTapeProps> = ({ indices, stocks, onSelec
             <div key={`${prefix}-idx-${idx.symbol}`} className="inline-flex items-center gap-2 text-xs sm:text-sm">
               <span className="font-extrabold text-slate-200 font-mono tracking-tight">{idx.symbol}</span>
               <span className="font-mono text-white tabular-nums font-semibold">
-                {idx.symbol.includes('%') || idx.symbol.includes('.D') 
+                {!Number.isFinite(idx.price)
+                  ? '—' /* T11: data hilang/NaN tidak boleh tampil sebagai $0 */
+                  : idx.symbol.includes('%') || idx.symbol.includes('.D')
                   ? `${idx.price.toFixed(2)}%`
                   : idx.symbol.includes('TOTAL')
-                  ? `$${(idx.price / 1000).toFixed(2)}T`
+                  ? `$${idx.price.toFixed(2)}T` /* nilai indeks sudah dalam satuan triliun */
                   : idx.price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
               </span>
               <span

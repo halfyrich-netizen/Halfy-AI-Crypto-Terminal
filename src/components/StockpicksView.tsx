@@ -788,7 +788,7 @@ export const StockpicksView: React.FC<StockpicksViewProps> = ({
                     </span>
                   </div>
                   <div>
-                    <span className="text-[10px] text-slate-400 block">Tingkat Keyakinan</span>
+                    <span className="text-[10px] text-slate-400 block">Kualitas Sinyal (0–100)</span>
                     <strong className="text-base text-amber-400 font-black mt-1 block">
                       {aiAnalysisResult.data.confidenceScore}%
                     </strong>

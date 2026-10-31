@@ -1,13 +1,43 @@
-import React, { useState, useEffect } from 'react';
-import { PortfolioPosition, ClosedTradePosition, Stock, BotConfig, BotExecutionLog } from '../types/stock';
+import React, { useState, useEffect, useRef } from 'react';
+import { PortfolioPosition, ClosedTradePosition, Stock, BotConfig, BotExecutionLog, MarketRegime } from '../types/stock';
 import { Language, translations } from '../utils/translations';
-import { 
-  INITIAL_BOT_CONFIG, 
-  INITIAL_BOT_POSITIONS, 
-  INITIAL_BOT_CLOSED_TRADES, 
+import {
+  INITIAL_BOT_CONFIG,
+  INITIAL_HYBRID_CONFIG,
+  INITIAL_BOT_POSITIONS,
+  INITIAL_BOT_CLOSED_TRADES,
   INITIAL_BOT_LOGS,
-  calculateBotPositionSize 
+  calculateBotPositionSize
 } from '../utils/botEngine';
+import {
+  evaluateRiskEngine,
+  validateInitialGeometry,
+  isStopTriggered,
+  isSymbolInCooldown,
+  computeOrderSizing,
+  makeSetupId,
+} from '../utils/riskEngine';
+
+// ---- Arsip Sesi: snapshot lengkap tiap buku sebelum reset ----
+interface SessionBookSnapshot {
+  liquidity: number;
+  openPositions: number;
+  closedTrades: ClosedTradePosition[];
+  realizedPnL: number;
+  openPnL: number;
+  finalEquity: number;
+  winrate: number;
+  wins: number;
+}
+
+interface RecordedSession {
+  id: string;
+  endedAt: string;
+  scope: string;
+  manual: SessionBookSnapshot;
+  bot: SessionBookSnapshot;
+  hybrid: SessionBookSnapshot;
+}
 import { 
   Briefcase, 
   Plus, 
@@ -60,6 +90,8 @@ interface PortfolioViewProps {
   openAddModalSignal?: number;
   onClearPendingAddStock?: () => void;
   onResetSimulation?: (initialBalance?: number) => void;
+  binanceLastSync?: number | null;
+  marketRegime?: MarketRegime | null;
   lang?: Language;
 }
 
@@ -77,19 +109,23 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
   openAddModalSignal,
   onClearPendingAddStock,
   onResetSimulation,
+  binanceLastSync = null,
+  marketRegime = null,
   lang = 'ID',
 }) => {
   const isEn = lang === 'EN';
   const t = translations[lang] || translations.ID;
 
   // Main view mode: 'manual' | 'bot' | 'settings' | 'battle'
-  const [portfolioMode, setPortfolioMode] = useState<'manual' | 'bot' | 'settings' | 'battle'>('manual');
+  const [portfolioMode, setPortfolioMode] = useState<'manual' | 'bot' | 'hybrid' | 'settings' | 'battle'>('manual');
   const [activeSubTab, setActiveSubTab] = useState<'open' | 'closed'>('open');
-  const [botSubTab, setBotSubTab] = useState<'open' | 'closed'>('open');
+  const [botSubTab, setBotSubTab] = useState<'open' | 'closed' | 'hybrid'>('open');
+  // Panel Settings & Strategi inline di dalam mode Bot (bukan mode terpisah)
+  const [showBotSettingsPanel, setShowBotSettingsPanel] = useState(false);
 
   // Simulation Reset State
   const [showResetModal, setShowResetModal] = useState(false);
-  const [resetScope, setResetScope] = useState<'all' | 'manual' | 'bot'>('all');
+  const [resetScope, setResetScope] = useState<'all' | 'manual' | 'bot' | 'hybrid'>('all');
   const [resetCashInput, setResetCashInput] = useState<number>(25000);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
@@ -174,6 +210,140 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
 
   const [isBotScanning, setIsBotScanning] = useState(false);
   const [botScanResultMsg, setBotScanResultMsg] = useState('');
+  // Autopilot 24/7 — waktu scan otomatis terakhir (untuk indikator di header bot)
+  const [lastBotScanAt, setLastBotScanAt] = useState<Date | null>(null);
+  const botScanRunningRef = useRef(false);
+
+  // ==========================================
+  // HYBRID BOOK — buku portofolio ketiga yang berdiri sendiri
+  // (kas, posisi, riwayat & konfigurasi sendiri; engine sama dengan Pure AI,
+  // tapi archetype HYBRID + risk multiplier kalibrasi user). Mulai dari nol, tanpa seed fiktif.
+  // ==========================================
+  const [hybridConfig, setHybridConfig] = useState<BotConfig>(() => {
+    try {
+      const saved = localStorage.getItem('halfy_hybrid_config_crypto_v1');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return { ...INITIAL_HYBRID_CONFIG, ...parsed };
+      }
+    } catch {
+      // fallback
+    }
+    return INITIAL_HYBRID_CONFIG;
+  });
+  const [hybridPositions, setHybridPositions] = useState<PortfolioPosition[]>(() => {
+    try {
+      const saved = localStorage.getItem('halfy_hybrid_positions_crypto_v1');
+      if (saved) return JSON.parse(saved);
+    } catch {
+      // fallback
+    }
+    return [];
+  });
+  const [hybridClosedTrades, setHybridClosedTrades] = useState<ClosedTradePosition[]>(() => {
+    try {
+      const saved = localStorage.getItem('halfy_hybrid_closed_crypto_v1');
+      if (saved) return JSON.parse(saved);
+    } catch {
+      // fallback
+    }
+    return [];
+  });
+  const [hybridLogs, setHybridLogs] = useState<BotExecutionLog[]>(() => {
+    try {
+      const saved = localStorage.getItem('halfy_hybrid_logs_crypto_v1');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch {
+      // fallback
+    }
+    return [];
+  });
+  const [lastHybridScanAt, setLastHybridScanAt] = useState<Date | null>(null);
+  // Arsip sesi — snapshot tiap reset untuk analisis historis
+  const [showSessionArchive, setShowSessionArchive] = useState(false);
+  const [sessionArchive, setSessionArchive] = useState<RecordedSession[]>(() => {
+    try {
+      const saved = localStorage.getItem('halfy_session_archive_v1');
+      if (saved) return JSON.parse(saved);
+    } catch {
+      // fallback
+    }
+    return [];
+  });
+  const [expandedSessionId, setExpandedSessionId] = useState<string | null>(null);
+
+  // ==========================================
+  // P0.4/P0.6 — RISK STATE per buku: cooldown SL per simbol + stop beruntun.
+  // Persisten agar restart/refresh tidak mereset proteksi.
+  // ==========================================
+  const [botRiskState, setBotRiskState] = useState<{ cooldowns: Record<string, number>; consecutiveStopped: number }>(() => {
+    try {
+      const saved = localStorage.getItem('halfy_bot_riskstate_crypto_v1');
+      if (saved) return { cooldowns: {}, consecutiveStopped: 0, ...JSON.parse(saved) };
+    } catch {
+      // fallback
+    }
+    return { cooldowns: {}, consecutiveStopped: 0 };
+  });
+  const [hybridRiskState, setHybridRiskState] = useState<{ cooldowns: Record<string, number>; consecutiveStopped: number }>(() => {
+    try {
+      const saved = localStorage.getItem('halfy_hybrid_riskstate_crypto_v1');
+      if (saved) return { cooldowns: {}, consecutiveStopped: 0, ...JSON.parse(saved) };
+    } catch {
+      // fallback
+    }
+    return { cooldowns: {}, consecutiveStopped: 0 };
+  });
+  useEffect(() => {
+    try { const __next = JSON.stringify(botRiskState); if (localStorage.getItem('halfy_bot_riskstate_crypto_v1') !== __next) localStorage.setItem('halfy_bot_riskstate_crypto_v1', __next); } catch { /* ignore */ }
+  }, [botRiskState]);
+  useEffect(() => {
+    try { const __next = JSON.stringify(hybridRiskState); if (localStorage.getItem('halfy_hybrid_riskstate_crypto_v1') !== __next) localStorage.setItem('halfy_hybrid_riskstate_crypto_v1', __next); } catch { /* ignore */ }
+  }, [hybridRiskState]);
+
+  // Persistensi buku hybrid
+  useEffect(() => {
+    try { do { const __next = JSON.stringify(hybridConfig); if (localStorage.getItem('halfy_hybrid_config_crypto_v1') !== __next) localStorage.setItem('halfy_hybrid_config_crypto_v1', __next); } while (0); } catch { /* ignore */ }
+  }, [hybridConfig]);
+  useEffect(() => {
+    try { do { const __next = JSON.stringify(hybridPositions); if (localStorage.getItem('halfy_hybrid_positions_crypto_v1') !== __next) localStorage.setItem('halfy_hybrid_positions_crypto_v1', __next); } while (0); } catch { /* ignore */ }
+  }, [hybridPositions]);
+  useEffect(() => {
+    try { do { const __next = JSON.stringify(hybridClosedTrades); if (localStorage.getItem('halfy_hybrid_closed_crypto_v1') !== __next) localStorage.setItem('halfy_hybrid_closed_crypto_v1', __next); } while (0); } catch { /* ignore */ }
+  }, [hybridClosedTrades]);
+  useEffect(() => {
+    try { do { const __next = JSON.stringify(hybridLogs); if (localStorage.getItem('halfy_hybrid_logs_crypto_v1') !== __next) localStorage.setItem('halfy_hybrid_logs_crypto_v1', __next); } while (0); } catch { /* ignore */ }
+  }, [hybridLogs]);
+
+  // Sinkronisasi lintas-tab untuk buku bot & hybrid: adopsi perubahan dari tab lain
+  // alih-alih saling menimpa dengan state basi.
+  useEffect(() => {
+    const bookKeys = new Set([
+      'halfy_bot_config_crypto_v1', 'halfy_bot_positions_crypto_v1', 'halfy_bot_closed_crypto_v1', 'halfy_bot_logs_crypto_v1',
+      'halfy_hybrid_config_crypto_v1', 'halfy_hybrid_positions_crypto_v1', 'halfy_hybrid_closed_crypto_v1', 'halfy_hybrid_logs_crypto_v1',
+    ]);
+    const onStorage = (e: StorageEvent) => {
+      if (!e.key || !bookKeys.has(e.key) || e.newValue == null) return;
+      try {
+        const next = JSON.parse(e.newValue);
+        if (e.key === 'halfy_bot_config_crypto_v1') setBotConfig((prev) => (JSON.stringify(prev) === e.newValue ? prev : { ...INITIAL_BOT_CONFIG, ...next }));
+        else if (e.key === 'halfy_bot_positions_crypto_v1') setBotPositions((prev) => (JSON.stringify(prev) === e.newValue ? prev : next));
+        else if (e.key === 'halfy_bot_closed_crypto_v1') setBotClosedTrades((prev) => (JSON.stringify(prev) === e.newValue ? prev : next));
+        else if (e.key === 'halfy_bot_logs_crypto_v1') setBotLogs((prev) => (JSON.stringify(prev) === e.newValue ? prev : next));
+        else if (e.key === 'halfy_hybrid_config_crypto_v1') setHybridConfig((prev) => (JSON.stringify(prev) === e.newValue ? prev : { ...INITIAL_HYBRID_CONFIG, ...next }));
+        else if (e.key === 'halfy_hybrid_positions_crypto_v1') setHybridPositions((prev) => (JSON.stringify(prev) === e.newValue ? prev : next));
+        else if (e.key === 'halfy_hybrid_closed_crypto_v1') setHybridClosedTrades((prev) => (JSON.stringify(prev) === e.newValue ? prev : next));
+        else if (e.key === 'halfy_hybrid_logs_crypto_v1') setHybridLogs((prev) => (JSON.stringify(prev) === e.newValue ? prev : next));
+      } catch {
+        // ignore malformed
+      }
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
 
   // Bot Scan & Trade Execution Audit Report Modal state
   const [showAuditModal, setShowAuditModal] = useState(false);
@@ -209,10 +379,10 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
   // Persist Bot State
   useEffect(() => {
     try {
-      localStorage.setItem('halfy_bot_config_crypto_v1', JSON.stringify(botConfig));
-      localStorage.setItem('halfy_bot_positions_crypto_v1', JSON.stringify(botPositions));
-      localStorage.setItem('halfy_bot_closed_crypto_v1', JSON.stringify(botClosedTrades));
-      localStorage.setItem('halfy_bot_logs_crypto_v1', JSON.stringify(botLogs));
+      do { const __next = JSON.stringify(botConfig); if (localStorage.getItem('halfy_bot_config_crypto_v1') !== __next) localStorage.setItem('halfy_bot_config_crypto_v1', __next); } while (0);
+      do { const __next = JSON.stringify(botPositions); if (localStorage.getItem('halfy_bot_positions_crypto_v1') !== __next) localStorage.setItem('halfy_bot_positions_crypto_v1', __next); } while (0);
+      do { const __next = JSON.stringify(botClosedTrades); if (localStorage.getItem('halfy_bot_closed_crypto_v1') !== __next) localStorage.setItem('halfy_bot_closed_crypto_v1', __next); } while (0);
+      do { const __next = JSON.stringify(botLogs); if (localStorage.getItem('halfy_bot_logs_crypto_v1') !== __next) localStorage.setItem('halfy_bot_logs_crypto_v1', __next); } while (0);
     } catch {
       // ignore
     }
@@ -221,6 +391,53 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
   const handleExecuteReset = () => {
     const startingCash = Math.max(0, resetCashInput);
 
+    // 1. ARSIPKAN sesi yang berjalan SEBELUM dihapus — untuk analisis historis.
+    //    Semua buku disnapshot lengkap dengan riwayat trade tertutupnya.
+    try {
+      const prevArchive: RecordedSession[] = JSON.parse(localStorage.getItem('halfy_session_archive_v1') || '[]');
+      const entry: RecordedSession = {
+        id: `session-${Date.now()}`,
+        endedAt: new Date().toISOString(),
+        scope: resetScope,
+        manual: {
+          liquidity: liquidityBalance,
+          openPositions: portfolio.length,
+          closedTrades: closedTrades,
+          realizedPnL: manualTotalRealizedPnL,
+          openPnL: manualOpenPnL,
+          finalEquity: manualTotalEquity,
+          winrate: manualWinRate,
+          wins: manualWinningTrades,
+        },
+        bot: {
+          liquidity: botConfig.liquidityBalance,
+          openPositions: botPositions.length,
+          closedTrades: botClosedTrades,
+          realizedPnL: botTotalRealizedPnL,
+          openPnL: botOpenPnL,
+          finalEquity: botTotalEquity,
+          winrate: botWinRate,
+          wins: botWinningTrades,
+        },
+        hybrid: {
+          liquidity: hybridConfig.liquidityBalance,
+          openPositions: hybridPositions.length,
+          closedTrades: hybridClosedTrades,
+          realizedPnL: hybridRealizedPnL,
+          openPnL: hybridOpenPnL,
+          finalEquity: hybridTotalEquity,
+          winrate: hybridWinRate,
+          wins: hybridWinningTrades,
+        },
+      };
+      const archived = [entry, ...prevArchive].slice(0, 30);
+      localStorage.setItem('halfy_session_archive_v1', JSON.stringify(archived));
+      setSessionArchive(archived);
+    } catch (err) {
+      console.error('Gagal mengarsipkan sesi', err);
+    }
+
+    // 2. Hapus sesi aktif sesuai cakupan
     if (resetScope === 'manual' || resetScope === 'all') {
       if (onResetSimulation) {
         onResetSimulation(startingCash);
@@ -246,8 +463,26 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
       }
     }
 
+    if (resetScope === 'hybrid' || resetScope === 'all') {
+      setHybridPositions([]);
+      setHybridClosedTrades([]);
+      setHybridLogs([]);
+      setHybridConfig((prev) => ({
+        ...prev,
+        liquidityBalance: startingCash,
+      }));
+      try {
+        localStorage.removeItem('halfy_hybrid_positions_crypto_v1');
+        localStorage.removeItem('halfy_hybrid_closed_crypto_v1');
+        localStorage.removeItem('halfy_hybrid_logs_crypto_v1');
+        localStorage.setItem('halfy_hybrid_config_crypto_v1', JSON.stringify({ ...hybridConfig, liquidityBalance: startingCash }));
+      } catch (err) {
+        console.error('Failed to clear hybrid storage', err);
+      }
+    }
+
     setShowResetModal(false);
-    setToastMessage(t.resetSuccessToast || (isEn ? 'Simulation successfully reset to starting capital!' : 'Simulasi berhasil direset ke modal awal!'));
+    setToastMessage(t.resetSuccessToast || (isEn ? 'Session archived & simulation reset to starting capital!' : 'Sesi diarsipkan & simulasi direset ke modal awal!'));
     setTimeout(() => setToastMessage(null), 3500);
   };
 
@@ -283,6 +518,19 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
     if (val < 0.0001) return `$${val.toFixed(8)}`;
     if (val < 1) return `$${val.toFixed(4)}`;
     return `$${val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  };
+
+  // P0.7 — log timestamp: tampilkan waktu eksak (dari ISO) + usia relatif sekunder.
+  // Log lama dengan string relatif statis ("Baru saja") tetap ditampilkan apa adanya.
+  const formatLogTimestamp = (ts: string, en: boolean): string => {
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return ts; // seed lama berbasis teks relatif
+    const exact = d.toLocaleTimeString(en ? 'en-US' : 'id-ID') + ' ' + (en ? 'UTC+' + (-d.getTimezoneOffset() / 60) : 'WIB');
+    const ageMin = Math.floor((Date.now() - d.getTime()) / 60000);
+    const rel = ageMin < 1 ? (en ? 'just now' : 'baru saja')
+      : ageMin < 60 ? (en ? `${ageMin}m ago` : `${ageMin} mnt lalu`)
+      : `${Math.floor(ageMin / 60)}${en ? 'h ago' : ' jam lalu'}`;
+    return `${exact} · ${rel} · ${ts}`;
   };
 
   // Synchronize Margin % -> Allocation Amount -> Coin Quantity
@@ -425,18 +673,27 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
     const exitPrice = customExitPrice || positionToClose.currentPrice;
 
     if (isClosingBotPosition) {
+      // P0.4 — tutup manual book-aware: mode Bot = buku Pure AI, mode Hybrid = buku Hybrid
+      const setBookPositions = isHybridMode ? setHybridPositions : setBotPositions;
+      const setBookConfig = isHybridMode ? setHybridConfig : setBotConfig;
+      const setBookClosedTrades = isHybridMode ? setHybridClosedTrades : setBotClosedTrades;
+      const setBookLogs = isHybridMode ? setHybridLogs : setBotLogs;
+      const setRiskState = isHybridMode ? setHybridRiskState : setBotRiskState;
+      const bookCfg = isHybridMode ? hybridConfig : botConfig;
+      const closeNowMs = Date.now();
+
       const closeVal = Math.round(positionToClose.sharesTotal * exitPrice * 100) / 100;
       const pnl = Math.round((closeVal - positionToClose.totalCost) * 100) / 100;
       const pnlPct = positionToClose.totalCost > 0 ? Math.round((pnl / positionToClose.totalCost) * 10000) / 100 : 0;
 
-      setBotPositions((prev) => prev.filter((p) => p.id !== positionToClose.id));
-      setBotConfig((prev) => ({
+      setBookPositions((prev) => prev.filter((p) => p.id !== positionToClose.id));
+      setBookConfig((prev) => ({
         ...prev,
         liquidityBalance: Math.round((prev.liquidityBalance + closeVal) * 100) / 100,
       }));
 
       const newClosedTrade: ClosedTradePosition = {
-        id: `bot-closed-${Date.now()}-${positionToClose.symbol}`,
+        id: `${isHybridMode ? 'hyb' : 'bot'}-closed-${Date.now()}-${positionToClose.symbol}`,
         symbol: positionToClose.symbol,
         name: positionToClose.name,
         market: positionToClose.market,
@@ -453,22 +710,32 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
         notes: isEn
           ? `Manual exit on bot position at $${exitPrice} (${pnlPct >= 0 ? '+' : ''}${pnlPct}%)`
           : `Market exit manual pada posisi bot di $${exitPrice} (${pnlPct >= 0 ? '+' : ''}${pnlPct}%)`,
-        executedBy: 'AI_BOT',
+        executedBy: isHybridMode ? 'HYBRID' : 'AI_BOT',
       };
 
-      setBotClosedTrades((prev) => [newClosedTrade, ...prev]);
+      setBookClosedTrades((prev) => [newClosedTrade, ...prev]);
 
-      setBotLogs((prev) => [
+      // P0.6 — SL manual ikut memicu cooldown & hitungan stop beruntun; TP me-reset
+      if (closeReason === 'STOP_LOSS') {
+        setRiskState((prev) => ({
+          cooldowns: { ...prev.cooldowns, [positionToClose.symbol]: closeNowMs + 30 * 60 * 1000 },
+          consecutiveStopped: prev.consecutiveStopped + 1,
+        }));
+      } else if (closeReason === 'TAKE_PROFIT') {
+        setRiskState((prev) => ({ ...prev, consecutiveStopped: 0 }));
+      }
+
+      setBookLogs((prev) => [
         {
-          id: `log-${Date.now()}-${Math.random().toString(36).substring(2, 8)}-${positionToClose.symbol}`,
-          timestamp: isEn ? 'Just now' : 'Baru saja',
+          id: `log-${closeNowMs}-${Math.random().toString(36).substring(2, 8)}-${positionToClose.symbol}`,
+          timestamp: new Date(closeNowMs).toISOString(),
           action: closeReason === 'TAKE_PROFIT' ? 'TAKE_PROFIT' : closeReason === 'STOP_LOSS' ? 'STOP_LOSS' : 'BUY_ENTRY',
           symbol: positionToClose.symbol,
           price: exitPrice,
           pnl,
           details: isEn
-            ? `[MANUAL BOT EXIT] User closed ${positionToClose.symbol} @ $${exitPrice}. Realized P&L: ${pnl >= 0 ? '+' : ''}$${pnl.toLocaleString()} (${pnlPct >= 0 ? '+' : ''}${pnlPct}%). Returned to bot cash: +$${closeVal.toLocaleString()} USDT.`
-            : `[MANUAL BOT EXIT] Pengguna menutup ${positionToClose.symbol} @ $${exitPrice}. Realisasi P&L: ${pnl >= 0 ? '+' : ''}$${pnl.toLocaleString()} (${pnlPct >= 0 ? '+' : ''}${pnlPct}%). Dikembalikan ke kas bot: +$${closeVal.toLocaleString()} USDT.`,
+            ? `[MANUAL ${bookCfg.archetype === 'HYBRID' ? 'HYBRID' : 'BOT'} EXIT] User closed ${positionToClose.symbol} @ $${exitPrice}. Realized P&L: ${pnl >= 0 ? '+' : ''}$${pnl.toLocaleString()} (${pnlPct >= 0 ? '+' : ''}${pnlPct}%). Returned to ${isHybridMode ? 'hybrid' : 'bot'} cash: +$${closeVal.toLocaleString()} USDT.${closeReason === 'STOP_LOSS' ? ' Cooldown 30m active.' : ''}`
+            : `[MANUAL ${bookCfg.archetype === 'HYBRID' ? 'HYBRID' : 'BOT'} EXIT] Pengguna menutup ${positionToClose.symbol} @ $${exitPrice}. Realisasi P&L: ${pnl >= 0 ? '+' : ''}$${pnl.toLocaleString()} (${pnlPct >= 0 ? '+' : ''}${pnlPct}%). Dikembalikan ke kas ${isHybridMode ? 'hybrid' : 'bot'}: +$${closeVal.toLocaleString()} USDT.${closeReason === 'STOP_LOSS' ? ' Cooldown 30m aktif.' : ''}`,
         },
         ...prev,
       ]);
@@ -485,37 +752,88 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
   // ==========================================
   // BOT AUTO-TRADE SCANNER & MONEY MANAGEMENT
   // ==========================================
-  const handleRunBotAutoScan = () => {
-    if (!botConfig.isActive) {
-      setBotScanResultMsg(isEn ? 'Bot is PAUSED. Please activate the bot first.' : 'Bot sedang dijeda (PAUSED). Aktifkan bot terlebih dahulu.');
+  // ==========================================
+  // BOT AUTO-TRADE SCANNER & MONEY MANAGEMENT
+  // Engine yang sama untuk dua buku terpisah: Pure AI (botConfig) & Hybrid (hybridConfig).
+  // Masing-masing punya kas, posisi, riwayat, dan konfigurasi sendiri.
+  // ==========================================
+  type ScanBook = 'bot' | 'hybrid';
+  const runBotScan = (book: ScanBook = 'bot', auto = false) => {
+    const isHybridBook = book === 'hybrid';
+    const cfg = isHybridBook ? hybridConfig : botConfig;
+    const positions = isHybridBook ? hybridPositions : botPositions;
+    const setConfig = isHybridBook ? setHybridConfig : setBotConfig;
+    const setPositions = isHybridBook ? setHybridPositions : setBotPositions;
+    const setClosed = isHybridBook ? setHybridClosedTrades : setBotClosedTrades;
+    const setLogs = isHybridBook ? setHybridLogs : setBotLogs;
+    const bookLabel = isHybridBook ? (isEn ? 'Hybrid Bot' : 'Bot Hybrid') : (isEn ? 'Pure AI Bot' : 'Bot Pure AI');
+    const idPrefix = isHybridBook ? 'hyb' : 'bot';
+    const cashLabel = isHybridBook ? (isEn ? 'hybrid cash' : 'kas hybrid') : (isEn ? 'bot cash' : 'kas bot');
+    const buyTag = isHybridBook ? 'HYBRID-BUY' : 'AUTO-BUY';
+
+    // P0.6 — risk state & batas keras PAPER (configurable; lihat riskEngine.ts)
+    const riskState = isHybridBook ? hybridRiskState : botRiskState;
+    const setRiskState = isHybridBook ? setHybridRiskState : setBotRiskState;
+    const bookClosedList = isHybridBook ? hybridClosedTrades : botClosedTrades;
+    const RISK_CONFIG = {
+      perTradeRiskPct: 0.5,        // default PAPER brief: 0.5% ekuitas per trade (hard cap)
+      maxPortfolioHeatPct: 4,      // heat stop-loss agregat maksimum
+      dailyLossGuardrailPct: 2,    // guardrail kerugian harian
+      maxConsecutiveStopped: 3,    // jeda strategi setelah 3 SL beruntun
+      maxQuoteAgeMs: 30000,        // quote lebih tua dari ini → fail-closed
+    };
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
+    // Usia quote: dari lastSync server (fallback null → cek stale dilewati tapi dilaporkan)
+    const quoteAgeMs = binanceLastSync != null ? Math.max(0, nowMs - binanceLastSync) : null;
+    // P1.2 — regime sebagai ELIGIBILITY GATE: TREND_DOWN & HIGH_VOLATILITY memblokir LONG baru
+    const regimeBlocksLong = marketRegime != null
+      && (marketRegime.state === 'TREND_DOWN' || marketRegime.state === 'HIGH_VOLATILITY');
+
+    if (botScanRunningRef.current) return; // cegah scan tumpang tindih (manual vs autopilot, bot vs hybrid)
+    if (!cfg.isActive) {
+      setBotScanResultMsg(
+        isEn
+          ? `${bookLabel} is PAUSED. Please activate it first.`
+          : `${bookLabel} sedang dijeda (PAUSED). Aktifkan terlebih dahulu.`
+      );
       return;
     }
 
+    botScanRunningRef.current = true;
     setIsBotScanning(true);
-    setBotScanResultMsg('');
+    if (!auto) setBotScanResultMsg('');
 
     setTimeout(() => {
-      let currentLiquidity = botConfig.liquidityBalance;
-      const currentBotPositions = [...botPositions];
+      let currentLiquidity = cfg.liquidityBalance;
+      const currentPositions = [...positions];
       const newLogs: BotExecutionLog[] = [];
       let openedCount = 0;
 
       // 1. Monitor existing positions for Take Profit / Stop Loss with live Binance prices
+      // P0.2/T14 — karantina posisi dengan geometri stop/target rusak:
+      // LONG initial stop harus < averageEntry (mis. TAO SL 460 vs entry 234).
+      // Stop rusak TIDAK di-trigger sebagai SL dan TIDAK dikoreksi otomatis —
+      // posisi dikarantina + di-alert, ditutup manual oleh user.
+      const quarantinedSymbols = new Set<string>();
       const updatedPositions: PortfolioPosition[] = [];
-      for (const pos of currentBotPositions) {
+      for (const pos of currentPositions) {
         const live = stocks.find((s) => s.symbol === pos.symbol);
         const livePrice = live ? live.currentPrice : pos.currentPrice;
 
-        if (pos.targetPrice && livePrice >= pos.targetPrice) {
+        const invalidInitialStop = pos.stopLoss != null && pos.stopLoss >= pos.averageBuyPrice; // LONG
+        const invalidTarget = pos.targetPrice != null && pos.targetPrice <= pos.averageBuyPrice; // LONG
+
+        if (pos.targetPrice && !invalidTarget && livePrice >= pos.targetPrice) {
           // AUTO TAKE PROFIT TRIGGERED
           const closeVal = Math.round(pos.sharesTotal * livePrice * 100) / 100;
           const pnl = Math.round((closeVal - pos.totalCost) * 100) / 100;
           const pnlPct = Math.round((pnl / pos.totalCost) * 10000) / 100;
 
           currentLiquidity += closeVal;
-          setBotClosedTrades((prev) => [
+          setClosed((prev) => [
             {
-              id: `bot-closed-${Date.now()}-${pos.symbol}`,
+              id: `${idPrefix}-closed-${Date.now()}-${Math.random().toString(36).substring(2, 8)}-${pos.symbol}`,
               symbol: pos.symbol,
               name: pos.name,
               market: pos.market,
@@ -530,32 +848,35 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
               dateClosed: new Date().toISOString(),
               closeReason: 'TAKE_PROFIT',
               notes: isEn ? `Auto TP1 triggered at $${livePrice} (+${pnlPct}%)` : `Auto TP1 terpicu di $${livePrice} (+${pnlPct}%)`,
-              executedBy: 'AI_BOT',
+              executedBy: isHybridBook ? 'HYBRID' : 'AI_BOT',
             },
             ...prev,
           ]);
 
+          // P0.6 — TP meng-reset hitungan stop-loss beruntun
+          setRiskState((prev) => ({ ...prev, consecutiveStopped: 0 }));
+
           newLogs.push({
-            id: `log-${Date.now()}-${Math.random().toString(36).substring(2, 8)}-${pos.symbol}`,
-            timestamp: isEn ? 'Just now' : 'Baru saja',
+            id: `log-${nowMs}-${Math.random().toString(36).substring(2, 8)}-${pos.symbol}`,
+            timestamp: nowIso,
             action: 'TAKE_PROFIT',
             symbol: pos.symbol,
             price: livePrice,
             pnl,
             details: isEn
-              ? `[AUTO-TP] Target TP1 reached for ${pos.symbol} @ $${livePrice}. Realized P&L: +$${pnl.toLocaleString()} (+${pnlPct}%). Returned to bot cash: +$${closeVal.toLocaleString()} USDT.`
-              : `[AUTO-TP] Target TP1 tercapai untuk ${pos.symbol} @ $${livePrice}. Realisasi P&L: +$${pnl.toLocaleString()} (+${pnlPct}%). Dikembalikan ke kas bot: +$${closeVal.toLocaleString()} USDT.`,
+              ? `[AUTO-TP] Target TP1 reached for ${pos.symbol} @ $${livePrice}. Realized P&L: +$${pnl.toLocaleString()} (+${pnlPct}%). Returned to ${cashLabel}: +$${closeVal.toLocaleString()} USDT.`
+              : `[AUTO-TP] Target TP1 tercapai untuk ${pos.symbol} @ $${livePrice}. Realisasi P&L: +$${pnl.toLocaleString()} (+${pnlPct}%). Dikembalikan ke ${cashLabel}: +$${closeVal.toLocaleString()} USDT.`,
           });
-        } else if (pos.stopLoss && livePrice <= pos.stopLoss) {
+        } else if (pos.stopLoss && !invalidInitialStop && isStopTriggered('LONG', livePrice, pos.stopLoss)) {
           // AUTO STOP LOSS TRIGGERED
           const closeVal = Math.round(pos.sharesTotal * livePrice * 100) / 100;
           const pnl = Math.round((closeVal - pos.totalCost) * 100) / 100;
           const pnlPct = Math.round((pnl / pos.totalCost) * 10000) / 100;
 
           currentLiquidity += closeVal;
-          setBotClosedTrades((prev) => [
+          setClosed((prev) => [
             {
-              id: `bot-closed-${Date.now()}-${Math.random().toString(36).substring(2, 8)}-${pos.symbol}`,
+              id: `${idPrefix}-closed-${Date.now()}-${Math.random().toString(36).substring(2, 8)}-${pos.symbol}`,
               symbol: pos.symbol,
               name: pos.name,
               market: pos.market,
@@ -570,21 +891,27 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
               dateClosed: new Date().toISOString(),
               closeReason: 'STOP_LOSS',
               notes: isEn ? `Stop loss discipline protection at $${livePrice} (${pnlPct}%)` : `Disiplin proteksi stop loss di $${livePrice} (${pnlPct}%)`,
-              executedBy: 'AI_BOT',
+              executedBy: isHybridBook ? 'HYBRID' : 'AI_BOT',
             },
             ...prev,
           ]);
 
+          // P0.4/P0.6 — SL memicu cooldown per simbol (30 menit) + hitung stop beruntun
+          setRiskState((prev) => ({
+            cooldowns: { ...prev.cooldowns, [pos.symbol]: nowMs + 30 * 60 * 1000 },
+            consecutiveStopped: prev.consecutiveStopped + 1,
+          }));
+
           newLogs.push({
-            id: `log-${Date.now()}-${Math.random().toString(36).substring(2, 8)}-${pos.symbol}`,
-            timestamp: isEn ? 'Just now' : 'Baru saja',
+            id: `log-${nowMs}-${Math.random().toString(36).substring(2, 8)}-${pos.symbol}`,
+            timestamp: nowIso,
             action: 'STOP_LOSS',
             symbol: pos.symbol,
             price: livePrice,
             pnl,
             details: isEn
-              ? `[AUTO-SL] Stop Loss triggered for ${pos.symbol} @ $${livePrice}. Capital protection realized: $${pnl.toLocaleString()} (${pnlPct}%).`
-              : `[AUTO-SL] Stop Loss terpicu untuk ${pos.symbol} @ $${livePrice}. Proteksi modal terealisasi: $${pnl.toLocaleString()} (${pnlPct}%).`,
+              ? `[AUTO-SL] Stop Loss triggered for ${pos.symbol} @ $${livePrice}. Capital protection realized: $${pnl.toLocaleString()} (${pnlPct}%). Cooldown 30m active for this symbol.`
+              : `[AUTO-SL] Stop Loss terpicu untuk ${pos.symbol} @ $${livePrice}. Proteksi modal terealisasi: $${pnl.toLocaleString()} (${pnlPct}%). Cooldown 30m aktif untuk simbol ini.`,
           });
         } else {
           // Keep active position updated with live Binance price
@@ -598,12 +925,53 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
             unrealizedPnL: updatedPnl,
             unrealizedPnLPercent: updatedPct,
           });
+          if (invalidInitialStop || invalidTarget) {
+            quarantinedSymbols.add(pos.symbol);
+          }
         }
+      }
+
+      // P0.2/T14 — alert karantina sekali per simbol per scan
+      for (const sym of quarantinedSymbols) {
+        newLogs.push({
+          id: `log-${nowMs}-quarantine-${sym}`,
+          timestamp: nowIso,
+          action: 'SIGNAL_SKIPPED',
+          symbol: sym,
+          price: stocks.find((s) => s.symbol === sym)?.currentPrice ?? 0,
+          details: isEn
+            ? `[RISK] Position ${sym} QUARANTINED: corrupted stop/target geometry (initial stop >= entry for LONG). Auto stop-loss DISABLED pending review — close manually or fix the signal source.`
+            : `[RISK] Posisi ${sym} DIKARANTINA: geometri stop/target rusak (initial stop >= entry untuk LONG). Auto stop-loss DINONAKTIFKAN menunggu tinjauan — tutup manual atau perbaiki sumber sinyal.`,
+        });
       }
 
       // 2. Scan AI Signals for New Entries with Strict Strategy Gating & Kelly Sizing
       const botEquity = currentLiquidity + updatedPositions.reduce((sum, p) => sum + p.currentValue, 0);
-      const availableSlots = Math.max(0, botConfig.maxConcurrentPositions - updatedPositions.length);
+      const availableSlots = Math.max(0, cfg.maxConcurrentPositions - updatedPositions.length);
+
+      // P0.6 — circuit breakers DIEVALUASI sebelum entry apa pun (fail-closed)
+      const dailyRealizedPnl = bookClosedList
+        .filter((c) => (c.dateClosed || '').slice(0, 10) === nowIso.slice(0, 10))
+        .reduce((acc, c) => acc + c.realizedPnL, 0);
+      const riskEval = evaluateRiskEngine({
+        equity: botEquity,
+        openPositions: updatedPositions.map((p) => ({
+          symbol: p.symbol,
+          side: 'LONG' as const,
+          initialRiskUsd: p.stopLoss != null
+            ? p.sharesTotal * Math.abs(p.averageBuyPrice - p.stopLoss)
+            : p.totalCost * 0.02,
+          notional: p.currentValue,
+        })),
+        dailyRealizedPnl,
+        consecutiveStoppedTrades: riskState.consecutiveStopped,
+        cooldowns: riskState.cooldowns,
+        now: nowMs,
+        lastQuoteAgeMs: quoteAgeMs,
+        mode: 'PAPER',
+        killSwitch: cfg.entriesPaused ? 'PAUSE_ENTRIES' : 'NONE',
+        config: RISK_CONFIG,
+      });
 
       const evaluatedReportCandidates: NonNullable<typeof scanAuditReport>['topCandidates'] = [];
 
@@ -612,29 +980,35 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
 
       let slotsRemaining = availableSlots;
 
-      for (const candidate of sortedStocks) {
+      // P0.6 — bila risk engine memblokir, LOOP ENTRY DILEWATI SELURUHNYA.
+      // Pemantauan TP/SL posisi existing tetap telah berjalan di atas (fail-closed untuk entry saja).
+      // P1.2 — regime gate: TREND_DOWN / HIGH_VOLATILITY memblokir LONG baru.
+      const regimeNote = regimeBlocksLong
+        ? ` [REGIME ${marketRegime!.state}: ${marketRegime!.reasons[0] || 'pasar tidak mendukung LONG baru'}]`
+        : marketRegime ? ` [REGIME ${marketRegime.state}]` : '';
+      if (riskEval.canEnter && !regimeBlocksLong) for (const candidate of sortedStocks) {
         const isAlreadyActive = updatedPositions.some((p) => p.symbol === candidate.symbol);
         const isLongSignal = candidate.aiSignal.action === 'Strong Long' || candidate.aiSignal.action === 'Long (Buy on Dip)';
-        const meetsConfidence = candidate.aiSignal.confidenceScore >= botConfig.minAiConfidence;
-        const meetsRR = candidate.aiSignal.riskRewardRatio >= botConfig.minRiskReward;
+        const meetsConfidence = candidate.aiSignal.confidenceScore >= cfg.minAiConfidence;
+        const meetsRR = candidate.aiSignal.riskRewardRatio >= cfg.minRiskReward;
 
         // Strategy Matrix Focus Check
         let matchesStrategy = true;
         let strategyFailReason = '';
-        if (botConfig.strategyFocus === 'WHALE_INFLOW' || botConfig.strategyFocus === 'WHALE_ACCUMULATION') {
+        if (cfg.strategyFocus === 'WHALE_INFLOW' || cfg.strategyFocus === 'WHALE_ACCUMULATION') {
           const thesisLower = candidate.aiSignal.thesis.toLowerCase();
           const hasWhale = thesisLower.includes('whale') || thesisLower.includes('akumulasi') || candidate.aiSignal.confidenceScore >= 80;
           if (!hasWhale) {
             matchesStrategy = false;
             strategyFailReason = isEn ? 'Does not meet Whale & Institutional Inflow filter' : 'Tidak memenuhi kriteria Akumulasi Whale Institusional';
           }
-        } else if (botConfig.strategyFocus === 'BREAKOUT_MOMENTUM') {
+        } else if (cfg.strategyFocus === 'BREAKOUT_MOMENTUM') {
           const isBreakout = candidate.aiSignal.action === 'Strong Long' || candidate.changePercent > 0;
           if (!isBreakout) {
             matchesStrategy = false;
             strategyFailReason = isEn ? 'Does not meet Breakout Momentum filter' : 'Tidak memenuhi kriteria Breakout Momentum Resistance';
           }
-        } else if (botConfig.strategyFocus === 'OVERSOLD_BOUNCE' || botConfig.strategyFocus === 'OVERSOLD_REBOUND') {
+        } else if (cfg.strategyFocus === 'OVERSOLD_BOUNCE' || cfg.strategyFocus === 'OVERSOLD_REBOUND') {
           const isOversold = candidate.aiSignal.action === 'Long (Buy on Dip)' || candidate.changePercent <= 0;
           if (!isOversold) {
             matchesStrategy = false;
@@ -672,11 +1046,50 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
           continue;
         }
 
+        // P0.2 (T01) — validasi geometri stop/target: TANPA koreksi otomatis.
+        // Stop rusak = kandidat ditolak dengan alasan eksplisit.
+        const geo = validateInitialGeometry({
+          side: 'LONG',
+          entry: candidate.currentPrice,
+          initialStop: candidate.aiSignal.stopLoss,
+          targets: [candidate.aiSignal.targetPrice1, candidate.aiSignal.targetPrice2],
+        });
+        if (!geo.valid) {
+          evaluatedReportCandidates.push({
+            symbol: candidate.symbol,
+            name: candidate.name,
+            price: candidate.currentPrice,
+            action: candidate.aiSignal.action,
+            confidence: candidate.aiSignal.confidenceScore,
+            riskReward: candidate.aiSignal.riskRewardRatio,
+            status: 'DISQUALIFIED',
+            disqualificationReason: `${geo.reasonCode}: ${geo.detail} — sinyal tidak dikoreksi otomatis`,
+            thesis: candidate.aiSignal.thesis,
+          });
+          continue;
+        }
+
+        // P0.4 (T06) — cooldown per simbol setelah stop-loss
+        if (isSymbolInCooldown(candidate.symbol, riskState.cooldowns, nowMs)) {
+          evaluatedReportCandidates.push({
+            symbol: candidate.symbol,
+            name: candidate.name,
+            price: candidate.currentPrice,
+            action: candidate.aiSignal.action,
+            confidence: candidate.aiSignal.confidenceScore,
+            riskReward: candidate.aiSignal.riskRewardRatio,
+            status: 'DISCIPLINE_HOLD',
+            disqualificationReason: `REJECTED_COOLDOWN: simbol ini baru mengalami stop-loss — cooldown 30 menit aktif sampai ${new Date(riskState.cooldowns[candidate.symbol]).toLocaleTimeString(isEn ? 'en-US' : 'id-ID')}`,
+            thesis: candidate.aiSignal.thesis,
+          });
+          continue;
+        }
+
         if (!isLongSignal || !meetsConfidence || !meetsRR) {
           let failReason = '';
           if (!isLongSignal) failReason = isEn ? 'Signal is neutral/short hedge' : 'Sinyal berstatus neutral/hedge';
-          else if (!meetsConfidence) failReason = isEn ? `Score ${candidate.aiSignal.confidenceScore}% < ${botConfig.minAiConfidence}% threshold` : `Skor ${candidate.aiSignal.confidenceScore}% < batas ${botConfig.minAiConfidence}%`;
-          else if (!meetsRR) failReason = isEn ? `R:R 1:${candidate.aiSignal.riskRewardRatio} < 1:${botConfig.minRiskReward} requirement` : `R:R 1:${candidate.aiSignal.riskRewardRatio} < syarat 1:${botConfig.minRiskReward}`;
+          else if (!meetsConfidence) failReason = isEn ? `Quality ${candidate.aiSignal.confidenceScore}/100 < ${cfg.minAiConfidence}/100 threshold` : `Kualitas ${candidate.aiSignal.confidenceScore}/100 < batas ${cfg.minAiConfidence}/100`;
+          else if (!meetsRR) failReason = isEn ? `R:R 1:${candidate.aiSignal.riskRewardRatio} < 1:${cfg.minRiskReward} requirement` : `R:R 1:${candidate.aiSignal.riskRewardRatio} < syarat 1:${cfg.minRiskReward}`;
 
           evaluatedReportCandidates.push({
             symbol: candidate.symbol,
@@ -694,23 +1107,29 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
 
         // Candidate passed strategy gates!
         if (slotsRemaining > 0) {
-          const multiplier = botConfig.archetype === 'HYBRID' ? (botConfig.hybridRiskMultiplier || 1.0) : 1.0;
-          const sizing = calculateBotPositionSize(
-            candidate,
-            botEquity,
-            currentLiquidity,
-            botConfig.riskPerTradePercent,
-            multiplier,
-            botConfig.sizingModel || 'KELLY_CRITERION'
-          );
+          // P0.3 — sizing DETERMINISTIC dari stop-distance aktual (bukan % notional).
+          // Hard cap PAPER 0.5% ekuitas; multiplier hybrid hanya melonggarkan rencana,
+          // cap tetap ditegakkan. Risk & R:R final dihitung ulang setelah pembulatan.
+          const multiplier = isHybridBook ? (cfg.hybridRiskMultiplier || 1.0) : 1.0;
+          const sizing = computeOrderSizing({
+            side: 'LONG',
+            entry: candidate.currentPrice,
+            initialStop: candidate.aiSignal.stopLoss,
+            target: candidate.aiSignal.targetPrice1,
+            equity: botEquity,
+            riskFraction: Math.min((cfg.riskPerTradePercent / 100) * multiplier, RISK_CONFIG.perTradeRiskPct / 100),
+            availableCash: currentLiquidity,
+            minNotional: 10,
+            maxNotional: currentLiquidity,
+          });
 
-          if (sizing.isValid && sizing.totalCost <= currentLiquidity && sizing.totalCost > 10) {
-            currentLiquidity -= sizing.totalCost;
+          if (sizing.valid && sizing.quantity > 0) {
+            currentLiquidity -= sizing.notional;
             slotsRemaining--;
             openedCount++;
 
             const newPos: PortfolioPosition = {
-              id: `bot-pos-${Date.now()}-${candidate.symbol}`,
+              id: `${idPrefix}-pos-${Date.now()}-${candidate.symbol}`,
               symbol: candidate.symbol,
               name: candidate.name,
               market: 'CRYPTO',
@@ -718,13 +1137,15 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
               sharesTotal: sizing.quantity,
               averageBuyPrice: candidate.currentPrice,
               currentPrice: candidate.currentPrice,
-              totalCost: sizing.totalCost,
-              currentValue: sizing.totalCost,
+              totalCost: sizing.notional,
+              currentValue: sizing.notional,
               unrealizedPnL: 0,
               unrealizedPnLPercent: 0,
               targetPrice: candidate.aiSignal.targetPrice1,
               stopLoss: candidate.aiSignal.stopLoss,
               dateAdded: new Date().toISOString().split('T')[0],
+              executedArchetype: isHybridBook ? 'HYBRID' : (cfg.archetype || 'AI_AUTONOMOUS'),
+              setupId: makeSetupId(candidate.symbol, isHybridBook ? 'HYBRID' : (cfg.archetype || 'PURE_AI'), nowMs),
             };
 
             updatedPositions.push(newPos);
@@ -739,9 +1160,9 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
               status: 'EXECUTED',
               sizing: {
                 units: sizing.quantity,
-                allocatedUsdt: sizing.totalCost,
-                riskAmount: sizing.riskAmount,
-                marginPercent: botEquity > 0 ? Math.round((sizing.totalCost / botEquity) * 1000) / 10 : 15,
+                allocatedUsdt: sizing.notional,
+                riskAmount: sizing.finalRiskUsd,
+                marginPercent: botEquity > 0 ? Math.round((sizing.notional / botEquity) * 1000) / 10 : 15,
                 tp: candidate.aiSignal.targetPrice1,
                 sl: candidate.aiSignal.stopLoss,
               },
@@ -749,15 +1170,15 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
             });
 
             newLogs.push({
-              id: `log-${Date.now()}-${Math.random().toString(36).substring(2, 8)}-${candidate.symbol}`,
-              timestamp: isEn ? 'Just now' : 'Baru saja',
+              id: `log-${nowMs}-${Math.random().toString(36).substring(2, 8)}-${candidate.symbol}`,
+              timestamp: nowIso,
               action: 'BUY_ENTRY',
               symbol: candidate.symbol,
               price: candidate.currentPrice,
               quantity: sizing.quantity,
               details: isEn
-                ? `[AUTO-BUY] ${sizing.quantity} ${candidate.symbol} @ $${candidate.currentPrice}. Capital: $${sizing.totalCost.toLocaleString()} USDT (${botConfig.riskPerTradePercent}% Risk: $${sizing.riskAmount.toLocaleString()}). SL: $${candidate.aiSignal.stopLoss} · TP: $${candidate.aiSignal.targetPrice1} (R:R 1:${candidate.aiSignal.riskRewardRatio}).`
-                : `[AUTO-BUY] ${sizing.quantity} ${candidate.symbol} @ $${candidate.currentPrice}. Modal: $${sizing.totalCost.toLocaleString()} USDT (${botConfig.riskPerTradePercent}% Risiko: $${sizing.riskAmount.toLocaleString()}). SL: $${candidate.aiSignal.stopLoss} · TP: $${candidate.aiSignal.targetPrice1} (R:R 1:${candidate.aiSignal.riskRewardRatio}).`,
+                ? `[${buyTag}] ${sizing.quantity} ${candidate.symbol} @ $${candidate.currentPrice}. Notional: $${sizing.notional.toLocaleString()} USDT. Actual risk: $${sizing.finalRiskUsd} (${sizing.finalRiskPct}% of equity, stop-distance). SL: $${candidate.aiSignal.stopLoss} · TP: $${candidate.aiSignal.targetPrice1} (final R:R 1:${sizing.rewardRiskRatio}). setupId: ${newPos.setupId}.`
+                : `[${buyTag}] ${sizing.quantity} ${candidate.symbol} @ $${candidate.currentPrice}. Notional: $${sizing.notional.toLocaleString()} USDT. Risiko aktual: $${sizing.finalRiskUsd} (${sizing.finalRiskPct}% ekuitas, jarak stop). SL: $${candidate.aiSignal.stopLoss} · TP: $${candidate.aiSignal.targetPrice1} (R:R final 1:${sizing.rewardRiskRatio}). setupId: ${newPos.setupId}.`,
             });
           } else {
             evaluatedReportCandidates.push({
@@ -768,7 +1189,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
               confidence: candidate.aiSignal.confidenceScore,
               riskReward: candidate.aiSignal.riskRewardRatio,
               status: 'DISCIPLINE_HOLD',
-              disqualificationReason: isEn ? 'Insufficient liquid cash for Kelly position sizing' : 'Saldo kas likuiditas tidak mencukupi formula Kelly sizing',
+              disqualificationReason: `${sizing.reasonCode || 'REJECTED'}: ${sizing.detail || 'sizing tidak valid'}`,
               thesis: candidate.aiSignal.thesis,
             });
           }
@@ -783,17 +1204,17 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
             riskReward: candidate.aiSignal.riskRewardRatio,
             status: 'DISCIPLINE_HOLD',
             disqualificationReason: isEn
-              ? `Max concurrent positions limit reached (${botConfig.maxConcurrentPositions}/${botConfig.maxConcurrentPositions} slots full). Risk management prevents random over-leveraging.`
-              : `Batas posisi aktif telah penuh (${botConfig.maxConcurrentPositions}/${botConfig.maxConcurrentPositions} slot). Disiplin manajemen risiko mencegah transaksi acak/over-leverage.`,
+              ? `Max concurrent positions limit reached (${cfg.maxConcurrentPositions}/${cfg.maxConcurrentPositions} slots full). Risk management prevents random over-leveraging.`
+              : `Batas posisi aktif telah penuh (${cfg.maxConcurrentPositions}/${cfg.maxConcurrentPositions} slot). Disiplin manajemen risiko mencegah transaksi acak/over-leverage.`,
             thesis: candidate.aiSignal.thesis,
           });
         }
       }
 
-      setBotPositions(updatedPositions);
-      setBotConfig((prev) => ({ ...prev, liquidityBalance: Math.round(currentLiquidity * 100) / 100 }));
+      setPositions(updatedPositions);
+      setConfig((prev) => ({ ...prev, liquidityBalance: Math.round(currentLiquidity * 100) / 100 }));
       if (newLogs.length > 0) {
-        setBotLogs((prev) => {
+        setLogs((prev) => {
           const combined = [...newLogs, ...prev];
           const seen = new Set<string>();
           return combined.filter((l) => {
@@ -805,33 +1226,62 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
       }
       setIsBotScanning(false);
 
-      const decisionSummary = openedCount > 0
-        ? (isEn
-            ? `Execution Approved: Bot opened ${openedCount} new trade(s) strictly abiding by Kelly Criterion sizing and 1:2.0+ R:R ratio.`
-            : `Eksekusi Disetujui: Bot membuka ${openedCount} trade baru sesuai Kelly Criterion sizing dan rasio R:R 1:2.0+.`)
-        : availableSlots === 0
-        ? (isEn
-            ? `Discipline Maintained: All ${botConfig.maxConcurrentPositions}/${botConfig.maxConcurrentPositions} slots are currently filled. Bot strictly avoids random trades to preserve capital until an existing trade hits TP or SL.`
-            : `Disiplin Terjaga: Seluruh ${botConfig.maxConcurrentPositions}/${botConfig.maxConcurrentPositions} slot posisi terisi. Bot menahan eksekusi acak untuk melindungi modal hingga posisi aktif mencapai TP atau SL.`)
-        : (isEn
-            ? `Scan Complete: Scanned ${stocks.length} assets. No unheld assets currently satisfy both Confidence ≥ ${botConfig.minAiConfidence}% and R:R ≥ 1:${botConfig.minRiskReward}.`
-            : `Pemindaian Selesai: Memindai ${stocks.length} aset. Tidak ada aset baru yang memenuhi syarat Confidence ≥ ${botConfig.minAiConfidence}% dan R:R ≥ 1:${botConfig.minRiskReward}.`);
+      const decisionSummary = (
+        !riskEval.canEnter
+          ? (isEn
+              ? `ENTRIES BLOCKED BY RISK ENGINE (${riskEval.health}): ${riskEval.reasons.join(' ')} Existing positions are still monitored for TP/SL.`
+              : `ENTRY DIBLOKIR RISK ENGINE (${riskEval.health}): ${riskEval.reasons.join(' ')} Posisi existing tetap dipantau untuk TP/SL.`)
+          : openedCount > 0
+          ? (isEn
+              ? `Execution Approved: ${bookLabel} opened ${openedCount} new trade(s). Sizing from actual stop-distance, hard cap ${RISK_CONFIG.perTradeRiskPct}% equity risk, R:R recalculated post-rounding.`
+              : `Eksekusi Disetujui: ${bookLabel} membuka ${openedCount} trade baru. Sizing dari jarak stop aktual, hard cap ${RISK_CONFIG.perTradeRiskPct}% risiko ekuitas, R:R dihitung ulang pasca-pembulatan.`)
+          : availableSlots === 0
+          ? (isEn
+              ? `Discipline Maintained: All ${cfg.maxConcurrentPositions}/${cfg.maxConcurrentPositions} slots are currently filled. No random trades until an existing trade hits TP or SL.`
+              : `Disiplin Terjaga: Seluruh ${cfg.maxConcurrentPositions}/${cfg.maxConcurrentPositions} slot posisi terisi. Tidak ada eksekusi acak sampai posisi aktif mencapai TP atau SL.`)
+          : (isEn
+              ? `Scan Complete: Scanned ${stocks.length} assets. No unheld assets satisfy Confidence ≥ ${cfg.minAiConfidence}/100, R:R ≥ 1:${cfg.minRiskReward}, and valid stop geometry.`
+              : `Pemindaian Selesai: Memindai ${stocks.length} aset. Tidak ada aset baru yang memenuhi Confidence ≥ ${cfg.minAiConfidence}/100, R:R ≥ 1:${cfg.minRiskReward}, dan geometri stop valid.`)
+      ) + (quarantinedSymbols.size > 0 ? ` [${isEn ? 'QUARANTINED' : 'DIKARANTINA'}: ${Array.from(quarantinedSymbols).join(', ')} — stop invalid, auto-SL off]` : '') + regimeNote;
 
       setScanAuditReport({
         timestamp: new Date().toLocaleTimeString(isEn ? 'en-US' : 'id-ID'),
         totalUniverseScanned: stocks.length,
         activeSlotsOccupied: updatedPositions.length,
-        maxSlots: botConfig.maxConcurrentPositions,
-        availableSlots: Math.max(0, botConfig.maxConcurrentPositions - updatedPositions.length),
+        maxSlots: cfg.maxConcurrentPositions,
+        availableSlots: Math.max(0, cfg.maxConcurrentPositions - updatedPositions.length),
         botCashAvailable: Math.round(currentLiquidity * 100) / 100,
         topCandidates: evaluatedReportCandidates.slice(0, 8),
         overallDecisionSummary: decisionSummary,
       });
 
       setBotScanResultMsg(decisionSummary);
-      setShowAuditModal(true);
+      if (!auto) setShowAuditModal(true);
+      if (isHybridBook) setLastHybridScanAt(new Date()); else setLastBotScanAt(new Date());
+      botScanRunningRef.current = false;
     }, 600);
   };
+
+  // Autopilot 24/7 — dua buku berjalan independen: Pure AI & Hybrid masing-masing
+  // punya interval sendiri selama book-nya aktif. Mode Manual tidak terpengaruh.
+  const botScanRef = useRef(runBotScan);
+  useEffect(() => {
+    botScanRef.current = runBotScan;
+  });
+
+  useEffect(() => {
+    const sec = botConfig.autoScanIntervalSec || 0;
+    if (!botConfig.isActive || sec <= 0) return;
+    const id = setInterval(() => botScanRef.current('bot', true), sec * 1000);
+    return () => clearInterval(id);
+  }, [botConfig.isActive, botConfig.autoScanIntervalSec]);
+
+  useEffect(() => {
+    const sec = hybridConfig.autoScanIntervalSec || 0;
+    if (!hybridConfig.isActive || sec <= 0) return;
+    const id = setInterval(() => botScanRef.current('hybrid', true), sec * 1000);
+    return () => clearInterval(id);
+  }, [hybridConfig.isActive, hybridConfig.autoScanIntervalSec]);
 
   // Manual Portfolio Metrics
   const manualTotalCost = portfolio.reduce((acc, p) => acc + p.totalCost, 0);
@@ -843,9 +1293,20 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
   const manualWinningTrades = closedTrades.filter((c) => c.realizedPnL > 0).length;
   const manualWinRate = closedTrades.length > 0 ? Math.round((manualWinningTrades / closedTrades.length) * 100) : 0;
 
-  // Bot Portfolio Metrics
-  const botTotalCost = botPositions.reduce((acc, p) => acc + p.totalCost, 0);
-  const botPositionsValue = botPositions.reduce((acc, p) => acc + p.currentValue, 0);
+  // Live mark-to-market untuk posisi bot — KPI, tabel, dan Battle Arena selalu
+  // tally dengan harga Binance terkini, bukan menunggu scan berikutnya.
+  const liveBotPositions = botPositions.map((p) => {
+    const live = stocks.find((s) => s.symbol === p.symbol);
+    const price = live ? live.currentPrice : p.currentPrice;
+    const value = Math.round(p.sharesTotal * price * 100) / 100;
+    const pnl = Math.round((value - p.totalCost) * 100) / 100;
+    const pct = p.totalCost > 0 ? Math.round((pnl / p.totalCost) * 10000) / 100 : 0;
+    return { ...p, currentPrice: price, currentValue: value, unrealizedPnL: pnl, unrealizedPnLPercent: pct };
+  });
+
+  // Bot Portfolio Metrics — berbasis liveBotPositions agar tally dengan harga live
+  const botTotalCost = liveBotPositions.reduce((acc, p) => acc + p.totalCost, 0);
+  const botPositionsValue = liveBotPositions.reduce((acc, p) => acc + p.currentValue, 0);
   const botOpenPnL = botPositionsValue - botTotalCost;
   const botOpenPnLPercent = botTotalCost > 0 ? (botOpenPnL / botTotalCost) * 100 : 0;
   const botTotalEquity = Math.round((botConfig.liquidityBalance + botPositionsValue) * 100) / 100;
@@ -857,6 +1318,121 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
   const manualTotalPnLOverall = manualOpenPnL + manualTotalRealizedPnL;
   const botTotalPnLOverall = botOpenPnL + botTotalRealizedPnL;
   const alphaSpread = Math.round((botTotalPnLOverall - manualTotalPnLOverall) * 100) / 100;
+
+  // Hybrid Book Metrics — buku ketiga berdiri sendiri (bukan atribusi dari buku bot)
+  const liveHybridPositions = hybridPositions.map((p) => {
+    const live = stocks.find((s) => s.symbol === p.symbol);
+    const price = live ? live.currentPrice : p.currentPrice;
+    const value = Math.round(p.sharesTotal * price * 100) / 100;
+    const pnl = Math.round((value - p.totalCost) * 100) / 100;
+    const pct = p.totalCost > 0 ? Math.round((pnl / p.totalCost) * 10000) / 100 : 0;
+    return { ...p, currentPrice: price, currentValue: value, unrealizedPnL: pnl, unrealizedPnLPercent: pct };
+  });
+  const hybridTotalCost = liveHybridPositions.reduce((acc, p) => acc + p.totalCost, 0);
+  const hybridPositionsValue = liveHybridPositions.reduce((acc, p) => acc + p.currentValue, 0);
+  const hybridOpenPnL = hybridPositionsValue - hybridTotalCost;
+  const hybridTotalEquity = Math.round((hybridConfig.liquidityBalance + hybridPositionsValue) * 100) / 100;
+  const hybridRealizedPnL = Math.round(hybridClosedTrades.reduce((acc, c) => acc + c.realizedPnL, 0) * 100) / 100;
+  const hybridUnrealizedPnL = Math.round(hybridOpenPnL * 100) / 100;
+  const hybridTotalPnL = Math.round((hybridOpenPnL + hybridRealizedPnL) * 100) / 100;
+  const hybridWinningTrades = hybridClosedTrades.filter((c) => c.realizedPnL > 0).length;
+  const hybridWinRate = hybridClosedTrades.length > 0 ? Math.round((hybridWinningTrades / hybridClosedTrades.length) * 100) : 0;
+  const hybridOpenPositions = liveHybridPositions;
+  const hybridHasTrackRecord = hybridPositions.length > 0 || hybridClosedTrades.length > 0;
+  const hybridAlphaSpread = Math.round((hybridTotalPnL - manualTotalPnLOverall) * 100) / 100;
+
+  // P1.6 — Analitik performa per buku dari closed trades (label jujur + sample size).
+  // Expectancy dalam R memakai initial risk (jarak entry→SL); gross & net dipisah.
+  const computePerformanceStats = (closed: ClosedTradePosition[], currentEquity: number) => {
+    const n = closed.length;
+    if (n === 0) return null;
+    const wins = closed.filter((c) => c.realizedPnL > 0);
+    const losses = closed.filter((c) => c.realizedPnL < 0);
+    const grossWin = wins.reduce((a, c) => a + c.realizedPnL, 0);
+    const grossLoss = Math.abs(losses.reduce((a, c) => a + c.realizedPnL, 0));
+    const profitFactor = grossLoss > 0 ? Math.round((grossWin / grossLoss) * 100) / 100 : null;
+    // R per trade: riwayat lama tidak menyimpan initial stop → aproximasi 3% dari entry
+    // (label PARTIAL — bukan R presisi; posisi baru menyimpan setupId & stop untuk presisi nanti)
+    const rValues = closed
+      .filter((c) => c.realizedPnL !== 0)
+      .map((c) => {
+        const initialRisk = c.quantity * c.averageBuyPrice * 0.03;
+        return initialRisk > 0 ? c.realizedPnL / initialRisk : 0;
+      });
+    const expectancyR = rValues.length > 0 ? Math.round((rValues.reduce((a, b) => a + b, 0) / rValues.length) * 100) / 100 : null;
+    const avgWin = wins.length > 0 ? Math.round((grossWin / wins.length) * 100) / 100 : null;
+    const avgLoss = losses.length > 0 ? Math.round((grossLoss / losses.length) * 100) / 100 : null;
+    // Max drawdown dari kurva kumulatif realized PnL (urut tanggal tutup)
+    const sorted = [...closed].sort((a, b) => (a.dateClosed || '').localeCompare(b.dateClosed || ''));
+    let peak = 0, cum = 0, maxDd = 0;
+    for (const c of sorted) {
+      cum += c.realizedPnL;
+      peak = Math.max(peak, cum);
+      maxDd = Math.max(maxDd, peak - cum);
+    }
+    return {
+      n,
+      winRatePct: Math.round((wins.length / n) * 100),
+      profitFactor,
+      expectancyR,
+      rQuality: 'PARTIAL' as const,
+      avgWin,
+      avgLoss,
+      maxDrawdown: Math.round(maxDd * 100) / 100,
+      maxDrawdownPct: currentEquity > 0 ? Math.round((maxDd / currentEquity) * 10000) / 100 : 0,
+    };
+  };
+  const botPerf = computePerformanceStats(botClosedTrades, botTotalEquity);
+  const hybridPerf = computePerformanceStats(hybridClosedTrades, hybridTotalEquity);
+
+  // Book-aware bindings — mode 'bot' memakai buku Pure AI, mode 'hybrid' memakai buku Hybrid.
+  // Engine & JSX sama persis; hanya sumber data/konfigurasi yang berpindah.
+  const isHybridMode = portfolioMode === 'hybrid';
+  const bookConfig = isHybridMode ? hybridConfig : botConfig;
+  const setBookConfig = isHybridMode ? setHybridConfig : setBotConfig;
+  const bookPositions = isHybridMode ? hybridPositions : botPositions;
+  const bookClosedTrades = isHybridMode ? hybridClosedTrades : botClosedTrades;
+  const bookLogs = isHybridMode ? hybridLogs : botLogs;
+  const liveBookPositions = isHybridMode ? liveHybridPositions : liveBotPositions;
+  const bookTotalCost = isHybridMode ? hybridTotalCost : botTotalCost;
+  const bookPositionsValue = isHybridMode ? hybridPositionsValue : botPositionsValue;
+  const bookOpenPnL = isHybridMode ? hybridOpenPnL : botOpenPnL;
+  const bookOpenPnLPercent = isHybridMode
+    ? (hybridTotalCost > 0 ? (hybridOpenPnL / hybridTotalCost) * 100 : 0)
+    : botOpenPnLPercent;
+  const bookTotalEquity = isHybridMode ? hybridTotalEquity : botTotalEquity;
+  const bookTotalRealizedPnL = isHybridMode ? hybridRealizedPnL : botTotalRealizedPnL;
+  const bookWinningTrades = isHybridMode ? hybridWinningTrades : botWinningTrades;
+  const bookWinRate = isHybridMode ? hybridWinRate : botWinRate;
+  const bookInitialConfig = isHybridMode ? INITIAL_HYBRID_CONFIG : INITIAL_BOT_CONFIG;
+  const bookConfigStorageKey = isHybridMode ? 'halfy_hybrid_config_crypto_v1' : 'halfy_bot_config_crypto_v1';
+  const bookLastScanAt = isHybridMode ? lastHybridScanAt : lastBotScanAt;
+  const scanCurrentBook = (auto = false) => runBotScan(isHybridMode ? 'hybrid' : 'bot', auto);
+
+  // P0.6 — risk health buku aktif untuk UI (dihitung dari state live, bukan klaim)
+  const bookRiskEval = (() => {
+    const dailyRealized = bookClosedTrades
+      .filter((c) => (c.dateClosed || '').slice(0, 10) === new Date().toISOString().slice(0, 10))
+      .reduce((a, c) => a + c.realizedPnL, 0);
+    const rs = isHybridMode ? hybridRiskState : botRiskState;
+    return evaluateRiskEngine({
+      equity: bookTotalEquity,
+      openPositions: liveBookPositions.map((p) => ({
+        symbol: p.symbol,
+        side: 'LONG' as const,
+        initialRiskUsd: p.stopLoss != null ? p.sharesTotal * Math.abs(p.averageBuyPrice - p.stopLoss) : p.totalCost * 0.02,
+        notional: p.currentValue,
+      })),
+      dailyRealizedPnl: dailyRealized,
+      consecutiveStoppedTrades: rs.consecutiveStopped,
+      cooldowns: rs.cooldowns,
+      now: Date.now(),
+      lastQuoteAgeMs: binanceLastSync != null ? Math.max(0, Date.now() - binanceLastSync) : null,
+      mode: 'PAPER',
+      killSwitch: bookConfig.entriesPaused ? 'PAUSE_ENTRIES' : 'NONE',
+      config: { perTradeRiskPct: 0.5, maxPortfolioHeatPct: 4, dailyLossGuardrailPct: 2, maxConsecutiveStopped: 3, maxQuoteAgeMs: 30000 },
+    });
+  })();
 
   const handleQuickDeposit = (amount: number) => {
     if (onUpdateLiquidity) {
@@ -921,15 +1497,18 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
               </button>
 
               <button
-                onClick={() => setPortfolioMode('settings')}
+                onClick={() => setPortfolioMode('hybrid')}
                 className={`px-3 py-2 text-xs font-semibold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer ${
-                  portfolioMode === 'settings'
-                    ? 'bg-emerald-500 text-slate-950 font-bold shadow-sm'
+                  portfolioMode === 'hybrid'
+                    ? 'bg-purple-600 text-white font-bold shadow-sm'
                     : 'text-slate-400 hover:text-white'
                 }`}
               >
-                <SlidersHorizontal className="w-3.5 h-3.5" />
-                <span>{t.modeSettings || (isEn ? 'Bot Settings & Matrix' : 'Pengaturan Bot & Matriks')}</span>
+                <Zap className="w-3.5 h-3.5" />
+                <span>{isEn ? 'Hybrid AI Bot' : 'Bot Hybrid AI'}</span>
+                {hybridConfig.isActive && (
+                  <span className="w-2 h-2 rounded-full bg-purple-400 animate-pulse ml-0.5" />
+                )}
               </button>
 
               <button
@@ -946,14 +1525,24 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
             </div>
 
             {/* Reset Simulation Button */}
-            <button
-              onClick={() => setShowResetModal(true)}
-              className="px-3.5 py-2 text-xs font-semibold rounded-xl transition-all flex items-center gap-1.5 cursor-pointer bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 hover:text-white border border-rose-500/30 shadow-sm"
-              title={isEn ? "Reset portfolio positions, cash, and bot logs to start from scratch" : "Reset portofolio, kas, dan log bot untuk mulai dari nol"}
-            >
-              <RotateCcw className="w-3.5 h-3.5 text-rose-400" />
-              <span>{t.resetSimulationBtn || (isEn ? 'Reset Simulation' : 'Reset Simulasi')}</span>
-            </button>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={() => setShowSessionArchive(true)}
+                className="px-3.5 py-2 text-xs font-semibold rounded-xl transition-all flex items-center gap-1.5 cursor-pointer bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 shadow-sm"
+                title={isEn ? 'View archived sessions (analysis history)' : 'Lihat arsip sesi (riwayat analisis)'}
+              >
+                <History className="w-3.5 h-3.5 text-sky-400" />
+                <span>{isEn ? 'Session History' : 'Riwayat Sesi'}{sessionArchive.length > 0 ? ` (${sessionArchive.length})` : ''}</span>
+              </button>
+              <button
+                onClick={() => setShowResetModal(true)}
+                className="px-3.5 py-2 text-xs font-semibold rounded-xl transition-all flex items-center gap-1.5 cursor-pointer bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 hover:text-white border border-rose-500/30 shadow-sm"
+                title={isEn ? "Reset portfolio positions, cash, and bot logs to start from scratch" : "Reset portofolio, kas, dan log bot untuk mulai dari nol"}
+              >
+                <RotateCcw className="w-3.5 h-3.5 text-rose-400" />
+                <span>{t.resetSimulationBtn || (isEn ? 'Reset Simulation' : 'Reset Simulasi')}</span>
+              </button>
+            </div>
           </div>
         </div>
 
@@ -990,7 +1579,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                 </span>
               </div>
               <div className="text-lg sm:text-xl font-black font-mono text-white tabular-nums tracking-tight">
-                ${(portfolioMode === 'bot' ? botConfig.liquidityBalance : liquidityBalance).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                ${(portfolioMode === 'bot' ? botConfig.liquidityBalance : portfolioMode === 'hybrid' ? hybridConfig.liquidityBalance : liquidityBalance).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
               </div>
             </div>
             <div className="text-xs text-slate-400 mt-2 pt-2 border-t border-slate-800/80 flex items-center justify-between">
@@ -1021,11 +1610,11 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                 </span>
               </div>
               <div className="text-lg sm:text-xl font-black font-mono text-white tabular-nums tracking-tight">
-                ${(portfolioMode === 'bot' ? botPositionsValue : manualPositionsValue).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                ${(portfolioMode === 'bot' ? botPositionsValue : portfolioMode === 'hybrid' ? hybridPositionsValue : manualPositionsValue).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
               </div>
             </div>
             <div className="text-xs text-slate-400 mt-2 pt-2 border-t border-slate-800/80">
-              {portfolioMode === 'bot' ? botPositions.length : portfolio.length} {t.activeCoinPositions}
+              {portfolioMode === 'bot' ? botPositions.length : portfolioMode === 'hybrid' ? hybridPositions.length : portfolio.length} {t.activeCoinPositions}
             </div>
           </div>
 
@@ -1042,7 +1631,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                 </span>
               </div>
               <div className="text-lg sm:text-xl font-black font-mono text-white tabular-nums tracking-tight">
-                ${(portfolioMode === 'bot' ? botTotalEquity : manualTotalEquity).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                ${(portfolioMode === 'bot' ? botTotalEquity : portfolioMode === 'hybrid' ? hybridTotalEquity : manualTotalEquity).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
               </div>
             </div>
             <div className="text-xs text-slate-400 mt-2 pt-2 border-t border-slate-800/80">
@@ -1063,8 +1652,8 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                 </span>
               </div>
               {(() => {
-                const currentOpenPnL = portfolioMode === 'bot' ? botOpenPnL : manualOpenPnL;
-                const currentRealizedPnL = portfolioMode === 'bot' ? botTotalRealizedPnL : manualTotalRealizedPnL;
+                const currentOpenPnL = portfolioMode === 'bot' ? botOpenPnL : portfolioMode === 'hybrid' ? hybridOpenPnL : manualOpenPnL;
+                const currentRealizedPnL = portfolioMode === 'bot' ? botTotalRealizedPnL : portfolioMode === 'hybrid' ? hybridRealizedPnL : manualTotalRealizedPnL;
                 const isPos = currentOpenPnL >= 0;
 
                 return (
@@ -1078,7 +1667,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                     </div>
                     <div className="text-[11px] font-mono mt-2 pt-2 border-t border-slate-800/80 flex items-center justify-between">
                       <span className={isPos ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
-                        {isPos ? '+' : ''}{(portfolioMode === 'bot' ? botOpenPnLPercent : manualOpenPnLPercent).toFixed(2)}% Live
+                        {isPos ? '+' : ''}{(portfolioMode === 'bot' ? botOpenPnLPercent : portfolioMode === 'hybrid' ? (hybridTotalCost > 0 ? (hybridOpenPnL / hybridTotalCost) * 100 : 0) : manualOpenPnLPercent).toFixed(2)}% Live
                       </span>
                       <span className="text-slate-400">
                         {t.realizedPnlText} <strong className={currentRealizedPnL >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
@@ -1105,7 +1694,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                 </span>
               </div>
               <div className="text-lg sm:text-xl font-black font-mono text-emerald-400 tabular-nums tracking-tight">
-                {portfolioMode === 'bot' ? botWinRate : manualWinRate}%
+                {portfolioMode === 'bot' ? botWinRate : portfolioMode === 'hybrid' ? hybridWinRate : manualWinRate}%
               </div>
             </div>
             <div className="text-xs text-slate-400 font-mono mt-2 pt-2 border-t border-slate-800/80 flex items-center justify-between">
@@ -1372,7 +1961,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
       {/* =========================================================================
           VIEW MODE 2: AI AUTOTRADE BOT (WITH CLOSED TRADES HISTORY SUB-TAB)
          ========================================================================= */}
-      {portfolioMode === 'bot' && (
+      {(portfolioMode === 'bot' || portfolioMode === 'hybrid') && (
         <div className="space-y-6">
           {/* Bot Control Panel & Strategy Matrix */}
           <div className="bg-[#0e1626] border border-sky-900/60 rounded-2xl p-6 shadow-sm">
@@ -1384,18 +1973,67 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                 <div>
                   <div className="flex items-center gap-2">
                     <h2 className="text-lg font-bold text-white font-mono">
-                      {t.botEngineTitle}
+                      {(isHybridMode ? (isEn ? 'Hybrid AI Autotrade Engine' : 'Engine Autotrade Hybrid AI') : t.botEngineTitle)}
                     </h2>
                     <span
                       className={`text-[11px] px-2.5 py-0.5 rounded-full font-mono font-bold flex items-center gap-1.5 border ${
-                        botConfig.isActive
+                        bookConfig.isActive
                           ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40'
                           : 'bg-slate-800 text-slate-400 border-slate-700'
                       }`}
                     >
-                      <span className={`w-2 h-2 rounded-full ${botConfig.isActive ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500'}`} />
-                      <span>{botConfig.isActive ? t.botActiveBadge : t.botPausedBadge}</span>
+                      <span className={`w-2 h-2 rounded-full ${bookConfig.isActive ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500'}`} />
+                      <span>{bookConfig.isActive ? t.botActiveBadge : t.botPausedBadge}</span>
                     </span>
+                    <span
+                      className={`text-[11px] px-2.5 py-0.5 rounded-full font-mono font-bold border ${
+                        bookConfig.archetype === 'HYBRID'
+                          ? 'bg-purple-500/15 text-purple-300 border-purple-500/40'
+                          : 'bg-sky-500/15 text-sky-300 border-sky-500/40'
+                      }`}
+                    >
+                      {bookConfig.archetype === 'HYBRID'
+                        ? `HYBRID · ${bookConfig.hybridRiskMultiplier || 1.25}x RISK`
+                        : isEn ? 'PURE AI MODE' : 'MODE PURE AI'}
+                    </span>
+                    {bookConfig.isActive && (bookConfig.autoScanIntervalSec || 0) > 0 && (
+                      <span className="text-[11px] px-2.5 py-0.5 rounded-full font-mono font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/40 flex items-center gap-1.5">
+                        <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                        {isEn ? `AUTOPILOT 24/7 · every ${bookConfig.autoScanIntervalSec}s` : `AUTOPILOT 24/7 · tiap ${bookConfig.autoScanIntervalSec}s`}
+                        {bookLastScanAt && (
+                          <span className="text-emerald-400/70 font-normal">
+                            · {isEn ? 'last' : 'terakhir'} {bookLastScanAt.toLocaleTimeString(isEn ? 'en-US' : 'id-ID')}
+                          </span>
+                        )}
+                      </span>
+                    )}
+                    {bookRiskEval.health !== 'HEALTHY' && (
+                      <span
+                        className={`text-[11px] px-2.5 py-0.5 rounded-full font-mono font-bold border ${
+                          bookRiskEval.health === 'HALTED'
+                            ? 'bg-rose-500/15 text-rose-300 border-rose-500/40'
+                            : 'bg-amber-500/15 text-amber-300 border-amber-500/40'
+                        }`}
+                        title={bookRiskEval.reasons.join(' · ')}
+                      >
+                        {isEn ? 'RISK' : 'RISIKO'}: {bookRiskEval.health} · HEAT {bookRiskEval.portfolioHeatPct}%
+                        {bookConfig.entriesPaused ? ` · ${isEn ? 'ENTRIES PAUSED' : 'ENTRY DIPAUSET'}` : ''}
+                      </span>
+                    )}
+                    {marketRegime && (
+                      <span
+                        className={`text-[11px] px-2.5 py-0.5 rounded-full font-mono font-bold border ${
+                          marketRegime.state === 'TREND_UP'
+                            ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
+                            : marketRegime.state === 'TREND_DOWN' || marketRegime.state === 'HIGH_VOLATILITY'
+                            ? 'bg-rose-500/15 text-rose-300 border-rose-500/40'
+                            : 'bg-slate-800 text-slate-300 border-slate-700'
+                        }`}
+                        title={marketRegime.reasons.join(' · ') + ` · breadth ${marketRegime.breadthPct}%`}
+                      >
+                        REGIME: {marketRegime.state} · Breadth {marketRegime.breadthPct}%
+                      </span>
+                    )}
                   </div>
                   <p className="text-xs text-slate-300 mt-1 font-sans">
                     {t.botEngineDesc}
@@ -1406,24 +2044,53 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
               {/* Bot Actions */}
               <div className="flex items-center gap-2.5 shrink-0">
                 <button
-                  onClick={() => setBotConfig((prev) => ({ ...prev, isActive: !prev.isActive }))}
+                  onClick={() => setBookConfig((prev) => ({ ...prev, isActive: !prev.isActive }))}
                   className={`px-3.5 py-2 rounded-xl text-xs font-mono font-bold flex items-center gap-1.5 transition-colors cursor-pointer border ${
-                    botConfig.isActive
+                    bookConfig.isActive
                       ? 'bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border-rose-500/40'
                       : 'bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border-emerald-500/40'
                   }`}
                 >
-                  {botConfig.isActive ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
-                  <span>{botConfig.isActive ? t.pauseBotBtn : t.activateBotBtn}</span>
+                  {bookConfig.isActive ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
+                  <span>{bookConfig.isActive ? t.pauseBotBtn : t.activateBotBtn}</span>
                 </button>
 
                 <button
-                  onClick={handleRunBotAutoScan}
+                  onClick={() => scanCurrentBook(false)}
                   disabled={isBotScanning}
                   className="px-4 py-2 bg-sky-500 hover:bg-sky-400 text-slate-950 text-xs font-mono font-bold rounded-xl flex items-center gap-2 shadow-md transition-all cursor-pointer disabled:opacity-50"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${isBotScanning ? 'animate-spin' : ''}`} />
                   <span>{isBotScanning ? t.scanningText : t.scanAndExecuteBtn}</span>
+                </button>
+
+                {/* Settings & Strategi inline — menyatu di halaman portofolio bot */}
+                <button
+                  onClick={() => setShowBotSettingsPanel((prev) => !prev)}
+                  className={`px-3.5 py-2 rounded-xl text-xs font-mono font-bold flex items-center gap-1.5 transition-colors cursor-pointer border ${
+                    showBotSettingsPanel
+                      ? 'bg-emerald-500 text-slate-950 border-emerald-400 shadow-md'
+                      : 'bg-slate-900 hover:bg-slate-800 text-slate-300 border-slate-700'
+                  }`}
+                >
+                  <SlidersHorizontal className="w-3.5 h-3.5" />
+                  <span>{isEn ? 'Strategy & Settings' : 'Strategi & Pengaturan'}</span>
+                </button>
+
+                {/* P0.6 — kill switch PAUSE_ENTRIES: TP/SL tetap dipantau, entry baru diblok */}
+                <button
+                  onClick={() => setBookConfig((prev) => ({ ...prev, entriesPaused: !prev.entriesPaused }))}
+                  className={`px-3.5 py-2 rounded-xl text-xs font-mono font-bold flex items-center gap-1.5 transition-colors cursor-pointer border ${
+                    bookConfig.entriesPaused
+                      ? 'bg-amber-500 text-slate-950 border-amber-400 shadow-md'
+                      : 'bg-slate-900 hover:bg-slate-800 text-slate-300 border-slate-700'
+                  }`}
+                  title={isEn
+                    ? 'Kill switch: block NEW entries while keeping TP/SL management active'
+                    : 'Kill switch: blokir entry BARU sambil TP/SL posisi tetap dikelola'}
+                >
+                  <ShieldCheck className={`w-3.5 h-3.5 ${bookConfig.entriesPaused ? '' : 'text-amber-400'}`} />
+                  <span>{bookConfig.entriesPaused ? (isEn ? 'Entries Paused' : 'Entry Dipause') : (isEn ? 'Pause Entries' : 'Jeda Entry')}</span>
                 </button>
 
                 {scanAuditReport && (
@@ -1461,7 +2128,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
               <div className="bg-slate-900/90 p-3 rounded-xl border border-slate-800">
                 <span className="text-[10px] text-slate-400 block">{t.riskPerTrade}</span>
                 <strong className="text-amber-400 text-sm block mt-0.5">
-                  {botConfig.riskPerTradePercent}% (${Math.round((botTotalEquity * botConfig.riskPerTradePercent) / 100)} Max Loss)
+                  {Math.min(bookConfig.riskPerTradePercent, 0.5)}% (${Math.round((bookTotalEquity * Math.min(bookConfig.riskPerTradePercent, 0.5)) / 100)} Max Loss — stop-distance, cap PAPER 0.5%)
                 </strong>
                 <span className="text-[10px] text-slate-500">
                   {isEn ? 'Fixed Fractional Formula' : 'Formula Fixed Fractional'}
@@ -1471,7 +2138,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
               <div className="bg-slate-900/90 p-3 rounded-xl border border-slate-800">
                 <span className="text-[10px] text-slate-400 block">{t.maxConcurrentPos}</span>
                 <strong className="text-white text-sm block mt-0.5">
-                  {botPositions.length} / {botConfig.maxConcurrentPositions} Slots
+                  {bookPositions.length} / {bookConfig.maxConcurrentPositions} Slots
                 </strong>
                 <span className="text-[10px] text-slate-500">
                   {isEn ? 'Max Diversification' : 'Diversifikasi Maksimal'}
@@ -1481,7 +2148,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
               <div className="bg-slate-900/90 p-3 rounded-xl border border-slate-800">
                 <span className="text-[10px] text-slate-400 block">{t.minRrFilter}</span>
                 <strong className="text-emerald-400 text-sm block mt-0.5">
-                  1 : {botConfig.minRiskReward}.0
+                  1 : {bookConfig.minRiskReward}.0
                 </strong>
                 <span className="text-[10px] text-slate-500">
                   {isEn ? 'High Reward Filter' : 'Filter High Reward'}
@@ -1491,13 +2158,52 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
               <div className="bg-slate-900/90 p-3 rounded-xl border border-slate-800">
                 <span className="text-[10px] text-slate-400 block">{t.minAiConfidence}</span>
                 <strong className="text-sky-400 text-sm block mt-0.5">
-                  {botConfig.minAiConfidence}% Score
+                  {bookConfig.minAiConfidence}/100 Quality
                 </strong>
                 <span className="text-[10px] text-slate-500">
                   {isEn ? 'Quality Signal Gate' : 'Filter Kualitas Sinyal'}
                 </span>
               </div>
             </div>
+
+            {/* P1.6 — Analitik performa per buku (dari closed trades; label jujur + sample size) */}
+            {(() => {
+              const perf = isHybridMode ? hybridPerf : botPerf;
+              if (!perf) return null;
+              return (
+                <div className="mt-3 p-3 rounded-xl bg-slate-950/70 border border-slate-800 grid grid-cols-2 sm:grid-cols-5 gap-3 text-[11px] font-mono">
+                  <div>
+                    <span className="text-slate-500 block">{isEn ? 'Profit Factor' : 'Profit Factor'}</span>
+                    <strong className={perf.profitFactor != null && perf.profitFactor >= 1 ? 'text-emerald-400' : 'text-rose-400'}>
+                      {perf.profitFactor ?? '—'}
+                    </strong>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block">{isEn ? 'Expectancy (R, approx)' : 'Ekspektansi (R, aproks)'}</span>
+                    <strong className={(perf.expectancyR ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
+                      {perf.expectancyR != null ? `${perf.expectancyR >= 0 ? '+' : ''}${perf.expectancyR}R` : '—'}
+                    </strong>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block">{isEn ? 'Avg Win / Avg Loss' : 'Menang / Rata-rata Rugi'}</span>
+                    <strong className="text-slate-300">
+                      {perf.avgWin != null ? `+$${perf.avgWin.toLocaleString()}` : '—'} / {perf.avgLoss != null ? `-$${perf.avgLoss.toLocaleString()}` : '—'}
+                    </strong>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block">{isEn ? 'Max Drawdown (realized)' : 'Max Drawdown (realisasi)'}</span>
+                    <strong className="text-rose-400">-${perf.maxDrawdown.toLocaleString()} ({perf.maxDrawdownPct}%)</strong>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block">{isEn ? 'Sample' : 'Sampel'}</span>
+                    <strong className="text-slate-300">
+                      {perf.n} {isEn ? 'closed' : 'selesai'}
+                    </strong>
+                    <span className="text-amber-400/80 block text-[9px]">{isEn ? 'PAPER cohort · R approx' : 'Kohort PAPER · R aproks'}</span>
+                  </div>
+                </div>
+              );
+            })()}
           </div>
 
           {/* Bot Positions & CLOSED POSITIONS HISTORY Sub-Tabs */}
@@ -1513,7 +2219,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                   }`}
                 >
                   <Bot className="w-4 h-4" />
-                  <span>{t.botActivePositions} ({botPositions.length}/{botConfig.maxConcurrentPositions})</span>
+                  <span>{t.botActivePositions} ({bookPositions.length}/{bookConfig.maxConcurrentPositions})</span>
                 </button>
 
                 <button
@@ -1525,21 +2231,25 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                   }`}
                 >
                   <History className="w-4 h-4" />
-                  <span>{t.botClosedHistory} ({botClosedTrades.length})</span>
+                  <span>{t.botClosedHistory} ({bookClosedTrades.length})</span>
                 </button>
+
+                
               </div>
 
               <span className="text-xs text-slate-400 font-mono">
                 {botSubTab === 'open'
                   ? (isEn ? 'Auto TP1 & Stop Loss Standby' : 'Auto TP1 & Stop Loss Siaga')
-                  : `Bot Realized P&L: +$${botTotalRealizedPnL.toLocaleString()} (${botWinRate}% Winrate)`}
+                  : botSubTab === 'hybrid'
+                  ? `Hybrid P&L: ${hybridTotalPnL >= 0 ? '+' : ''}$${hybridTotalPnL.toLocaleString()} (${hybridWinRate}% Winrate)`
+                  : `Bot Realized P&L: +$${bookTotalRealizedPnL.toLocaleString()} (${bookWinRate}% Winrate)`}
               </span>
             </div>
 
             {/* Sub-Tab 1: Active Bot Open Positions Table */}
             {botSubTab === 'open' && (
               <>
-                {botPositions.length === 0 ? (
+                {bookPositions.length === 0 ? (
                   <div className="text-center py-10 text-slate-400 text-sm font-sans space-y-2">
                     <p>{t.noBotPositions}</p>
                     <p className="text-xs text-slate-500">
@@ -1562,7 +2272,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-800/60">
-                        {botPositions.map((pos, idx) => {
+                        {liveBookPositions.map((pos, idx) => {
                           const isPos = pos.unrealizedPnL >= 0;
 
                           return (
@@ -1601,22 +2311,37 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
 
                               <td className="py-3.5 px-3.5 text-center text-xs">
                                 <div className="flex flex-col items-center gap-0.5">
-                                  <div className="text-emerald-400 font-semibold flex items-center gap-1">
+                                  <div className={`font-semibold flex items-center gap-1 ${pos.stopLoss != null && pos.stopLoss >= pos.averageBuyPrice ? 'text-rose-400' : 'text-emerald-400'}`}>
                                     <Target className="w-3.5 h-3.5" />
                                     <span>TP: {formatPrice(pos.targetPrice || 0)}</span>
                                   </div>
-                                  <div className="text-rose-400 font-semibold flex items-center gap-1">
+                                  <div className={`font-semibold flex items-center gap-1 ${pos.stopLoss != null && pos.stopLoss >= pos.averageBuyPrice ? 'text-rose-400 font-bold' : 'text-rose-400'}`}>
                                     <ShieldCheck className="w-3.5 h-3.5" />
                                     <span>SL: {formatPrice(pos.stopLoss || 0)}</span>
                                   </div>
+                                  {/* P0.2/T14 — stop geometry invalid → NEEDS REVIEW menyolok */}
+                                  {pos.stopLoss != null && pos.stopLoss >= pos.averageBuyPrice && (
+                                    <span
+                                      className="text-[9px] font-mono font-black text-rose-300 bg-rose-950/80 border border-rose-500/60 px-1.5 py-0.5 rounded animate-pulse"
+                                      title={isEn ? 'Invalid stop: initial stop >= entry for LONG. Auto stop-loss disabled — close manually or review the signal source.' : 'Stop invalid: initial stop >= entry untuk LONG. Auto stop-loss dinonaktifkan — tutup manual atau tinjau sumber sinyal.'}
+                                    >
+                                      ⚠ NEEDS REVIEW
+                                    </span>
+                                  )}
                                 </div>
                               </td>
 
                               <td className="py-3.5 px-3.5 text-right whitespace-nowrap">
                                 <div className="flex items-center justify-end gap-2">
-                                  <span className="text-[10px] font-mono font-bold text-sky-400 bg-sky-950/80 px-2 py-1 rounded border border-sky-800/60 hidden xl:inline-block">
-                                    AUTO TP/SL
-                                  </span>
+                                  {pos.stopLoss != null && pos.stopLoss >= pos.averageBuyPrice ? (
+                                    <span className="text-[10px] font-mono font-bold text-rose-300 bg-rose-950/80 px-2 py-1 rounded border border-rose-500/60 hidden xl:inline-block">
+                                      QUARANTINED
+                                    </span>
+                                  ) : (
+                                    <span className="text-[10px] font-mono font-bold text-sky-400 bg-sky-950/80 px-2 py-1 rounded border border-sky-800/60 hidden xl:inline-block">
+                                      AUTO TP/SL
+                                    </span>
+                                  )}
                                   <button
                                     onClick={() => handleInitiateBotCloseTrade(pos)}
                                     className="px-2.5 py-1 bg-rose-500/15 hover:bg-rose-500/30 text-rose-300 hover:text-white border border-rose-500/40 rounded-lg text-xs font-bold font-mono inline-flex items-center gap-1 transition-all cursor-pointer shadow-sm"
@@ -1640,7 +2365,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
             {/* Sub-Tab 2: Bot CLOSED TRADES HISTORY TABLE */}
             {botSubTab === 'closed' && (
               <>
-                {botClosedTrades.length === 0 ? (
+                {bookClosedTrades.length === 0 ? (
                   <div className="text-center py-10 text-slate-400 text-sm font-sans space-y-2">
                     <p>{t.noBotClosedTrades}</p>
                     <p className="text-xs text-slate-500">
@@ -1663,7 +2388,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-800/60">
-                        {botClosedTrades.map((trade, idx) => {
+                        {bookClosedTrades.map((trade, idx) => {
                           const isProfit = trade.realizedPnL >= 0;
 
                           return (
@@ -1752,7 +2477,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
             </div>
 
             <div className="space-y-2.5">
-              {botLogs.map((log, idx) => (
+              {bookLogs.map((log, idx) => (
                 <div
                   key={`${log.id || 'log'}-${idx}`}
                   className="bg-slate-900/80 p-3 rounded-xl border border-slate-800/80 flex items-start justify-between gap-4 font-mono text-xs"
@@ -1771,7 +2496,10 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                     </span>
                     <div>
                       <p className="text-slate-200 leading-relaxed font-sans text-xs">{log.details}</p>
-                      <span className="text-[10px] text-slate-500 block mt-1 font-mono">{log.timestamp}</span>
+                      {/* P0.7 — timestamp eksak (UTC source) + relatif sekunder; bukan "Just now" statis */}
+                      <span className="text-[10px] text-slate-500 block mt-1 font-mono">
+                        {formatLogTimestamp(log.timestamp, isEn)}
+                      </span>
                     </div>
                   </div>
 
@@ -1794,7 +2522,8 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
       {/* =========================================================================
           VIEW MODE 3: BOT SETTINGS & STRATEGY MATRIX
          ========================================================================= */}
-      {portfolioMode === 'settings' && (
+      {/* Settings & Strategi Bot — mode terpisah (kompatibilitas) atau panel inline di dalam mode Bot */}
+      {(portfolioMode === 'settings' || ((portfolioMode === 'bot' || portfolioMode === 'hybrid') && showBotSettingsPanel)) && (
         <div className="space-y-6 animate-in fade-in duration-200">
           {/* Header Banner */}
           <div className="bg-[#0b1322] border border-emerald-500/30 rounded-2xl p-6 shadow-sm">
@@ -1825,7 +2554,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
 
                 <button
                   type="button"
-                  onClick={() => handleSaveBotSettings(botConfig)}
+                  onClick={() => handleSaveBotSettings(bookConfig)}
                   className="px-4 py-2 text-xs font-bold rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 transition-colors shadow-sm cursor-pointer flex items-center gap-1.5"
                 >
                   <Check className="w-3.5 h-3.5" />
@@ -1848,16 +2577,16 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                 </span>
               </div>
               <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-sky-950 text-sky-400 border border-sky-800">
-                Current: {botConfig.archetype || 'PURE_AI'}
+                Current: {bookConfig.archetype || 'PURE_AI'}
               </span>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               {/* Option 1: Pure AI */}
               <div
-                onClick={() => setBotConfig((prev) => ({ ...prev, archetype: 'PURE_AI' }))}
+                onClick={() => setBookConfig((prev) => ({ ...prev, archetype: 'PURE_AI' }))}
                 className={`p-4 rounded-xl border transition-all cursor-pointer flex flex-col justify-between ${
-                  botConfig.archetype === 'PURE_AI'
+                  bookConfig.archetype === 'PURE_AI'
                     ? 'bg-sky-950/40 border-sky-500/80 ring-1 ring-sky-500/40 shadow-md'
                     : 'bg-slate-900/60 border-slate-800 hover:border-slate-700'
                 }`}
@@ -1879,16 +2608,16 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                   </p>
                 </div>
                 <div className="mt-3 pt-3 border-t border-slate-800/80 text-[11px] font-semibold text-sky-400 flex items-center justify-between">
-                  <span>{botConfig.archetype === 'PURE_AI' ? '● ' + (isEn ? 'Active Selection' : 'Terpilih') : (isEn ? 'Click to select' : 'Klik untuk memilih')}</span>
-                  <span>Kelly Model</span>
+                  <span>{bookConfig.archetype === 'PURE_AI' ? '● ' + (isEn ? 'Active Selection' : 'Terpilih') : (isEn ? 'Click to select' : 'Klik untuk memilih')}</span>
+                  <span>Fixed Fractional (Kelly-form, p asumsi)</span>
                 </div>
               </div>
 
               {/* Option 2: Hybrid AI + User Calibration */}
               <div
-                onClick={() => setBotConfig((prev) => ({ ...prev, archetype: 'HYBRID' }))}
+                onClick={() => setBookConfig((prev) => ({ ...prev, archetype: 'HYBRID' }))}
                 className={`p-4 rounded-xl border transition-all cursor-pointer flex flex-col justify-between ${
-                  botConfig.archetype === 'HYBRID'
+                  bookConfig.archetype === 'HYBRID'
                     ? 'bg-purple-950/40 border-purple-500/80 ring-1 ring-purple-500/40 shadow-md'
                     : 'bg-slate-900/60 border-slate-800 hover:border-slate-700'
                 }`}
@@ -1910,16 +2639,16 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                   </p>
                 </div>
                 <div className="mt-3 pt-3 border-t border-slate-800/80 text-[11px] font-semibold text-purple-400 flex items-center justify-between">
-                  <span>{botConfig.archetype === 'HYBRID' ? '● ' + (isEn ? 'Active Selection' : 'Terpilih') : (isEn ? 'Click to select' : 'Klik untuk memilih')}</span>
-                  <span>{botConfig.hybridRiskMultiplier || 1.25}x Risk Multiplier</span>
+                  <span>{bookConfig.archetype === 'HYBRID' ? '● ' + (isEn ? 'Active Selection' : 'Terpilih') : (isEn ? 'Click to select' : 'Klik untuk memilih')}</span>
+                  <span>{bookConfig.hybridRiskMultiplier || 1.25}x Risk Multiplier</span>
                 </div>
               </div>
 
               {/* Option 3: Manual Discretionary */}
               <div
-                onClick={() => setBotConfig((prev) => ({ ...prev, archetype: 'MANUAL_DISCRETIONARY' }))}
+                onClick={() => setBookConfig((prev) => ({ ...prev, archetype: 'MANUAL_DISCRETIONARY' }))}
                 className={`p-4 rounded-xl border transition-all cursor-pointer flex flex-col justify-between ${
-                  botConfig.archetype === 'MANUAL_DISCRETIONARY'
+                  bookConfig.archetype === 'MANUAL_DISCRETIONARY'
                     ? 'bg-amber-950/40 border-amber-500/80 ring-1 ring-amber-500/40 shadow-md'
                     : 'bg-slate-900/60 border-slate-800 hover:border-slate-700'
                 }`}
@@ -1941,7 +2670,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                   </p>
                 </div>
                 <div className="mt-3 pt-3 border-t border-slate-800/80 text-[11px] font-semibold text-amber-400 flex items-center justify-between">
-                  <span>{botConfig.archetype === 'MANUAL_DISCRETIONARY' ? '● ' + (isEn ? 'Active Selection' : 'Terpilih') : (isEn ? 'Click to select' : 'Klik untuk memilih')}</span>
+                  <span>{bookConfig.archetype === 'MANUAL_DISCRETIONARY' ? '● ' + (isEn ? 'Active Selection' : 'Terpilih') : (isEn ? 'Click to select' : 'Klik untuk memilih')}</span>
                   <span>Manual Review</span>
                 </div>
               </div>
@@ -1963,9 +2692,9 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
               {/* All Signals */}
               <div
-                onClick={() => setBotConfig((prev) => ({ ...prev, strategyFocus: 'ALL_SIGNALS' }))}
+                onClick={() => setBookConfig((prev) => ({ ...prev, strategyFocus: 'ALL_SIGNALS' }))}
                 className={`p-3.5 rounded-xl border transition-all cursor-pointer ${
-                  botConfig.strategyFocus === 'ALL_SIGNALS' || !botConfig.strategyFocus
+                  bookConfig.strategyFocus === 'ALL_SIGNALS' || !bookConfig.strategyFocus
                     ? 'bg-amber-950/30 border-amber-500/80 ring-1 ring-amber-500/30'
                     : 'bg-slate-900/60 border-slate-800 hover:border-slate-700'
                 }`}
@@ -1981,9 +2710,9 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
 
               {/* Whale Inflow */}
               <div
-                onClick={() => setBotConfig((prev) => ({ ...prev, strategyFocus: 'WHALE_INFLOW' }))}
+                onClick={() => setBookConfig((prev) => ({ ...prev, strategyFocus: 'WHALE_INFLOW' }))}
                 className={`p-3.5 rounded-xl border transition-all cursor-pointer ${
-                  botConfig.strategyFocus === 'WHALE_INFLOW'
+                  bookConfig.strategyFocus === 'WHALE_INFLOW'
                     ? 'bg-sky-950/30 border-sky-500/80 ring-1 ring-sky-500/30'
                     : 'bg-slate-900/60 border-slate-800 hover:border-slate-700'
                 }`}
@@ -1999,9 +2728,9 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
 
               {/* Breakout Momentum */}
               <div
-                onClick={() => setBotConfig((prev) => ({ ...prev, strategyFocus: 'BREAKOUT_MOMENTUM' }))}
+                onClick={() => setBookConfig((prev) => ({ ...prev, strategyFocus: 'BREAKOUT_MOMENTUM' }))}
                 className={`p-3.5 rounded-xl border transition-all cursor-pointer ${
-                  botConfig.strategyFocus === 'BREAKOUT_MOMENTUM'
+                  bookConfig.strategyFocus === 'BREAKOUT_MOMENTUM'
                     ? 'bg-emerald-950/30 border-emerald-500/80 ring-1 ring-emerald-500/30'
                     : 'bg-slate-900/60 border-slate-800 hover:border-slate-700'
                 }`}
@@ -2017,9 +2746,9 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
 
               {/* Oversold Bounce */}
               <div
-                onClick={() => setBotConfig((prev) => ({ ...prev, strategyFocus: 'OVERSOLD_BOUNCE' }))}
+                onClick={() => setBookConfig((prev) => ({ ...prev, strategyFocus: 'OVERSOLD_BOUNCE' }))}
                 className={`p-3.5 rounded-xl border transition-all cursor-pointer ${
-                  botConfig.strategyFocus === 'OVERSOLD_BOUNCE'
+                  bookConfig.strategyFocus === 'OVERSOLD_BOUNCE'
                     ? 'bg-rose-950/30 border-rose-500/80 ring-1 ring-rose-500/30'
                     : 'bg-slate-900/60 border-slate-800 hover:border-slate-700'
                 }`}
@@ -2052,15 +2781,15 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
               <div className="space-y-3">
                 {/* Kelly Criterion */}
                 <div
-                  onClick={() => setBotConfig((prev) => ({ ...prev, sizingModel: 'KELLY_CRITERION' }))}
+                  onClick={() => setBookConfig((prev) => ({ ...prev, sizingModel: 'KELLY_CRITERION' }))}
                   className={`p-3.5 rounded-xl border transition-all cursor-pointer ${
-                    botConfig.sizingModel === 'KELLY_CRITERION' || !botConfig.sizingModel
+                    bookConfig.sizingModel === 'KELLY_CRITERION' || !bookConfig.sizingModel
                       ? 'bg-purple-950/30 border-purple-500/80'
                       : 'bg-slate-900/60 border-slate-800 hover:border-slate-700'
                   }`}
                 >
                   <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-white">{t.modelKelly || 'Kelly Criterion Formula'}</span>
+                    <span className="text-xs font-bold text-white">{t.modelKelly || 'Sizing Fixed Fractional (bentuk Kelly, p tidak terkalibrasi)'}</span>
                     <span className="text-[10px] text-purple-400 font-mono font-bold">Standard Pro</span>
                   </div>
                   <p className="text-xs text-slate-300 mt-1">
@@ -2072,9 +2801,9 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
 
                 {/* Fixed Fractional */}
                 <div
-                  onClick={() => setBotConfig((prev) => ({ ...prev, sizingModel: 'FIXED_FRACTIONAL' }))}
+                  onClick={() => setBookConfig((prev) => ({ ...prev, sizingModel: 'FIXED_FRACTIONAL' }))}
                   className={`p-3.5 rounded-xl border transition-all cursor-pointer ${
-                    botConfig.sizingModel === 'FIXED_FRACTIONAL'
+                    bookConfig.sizingModel === 'FIXED_FRACTIONAL'
                       ? 'bg-purple-950/30 border-purple-500/80'
                       : 'bg-slate-900/60 border-slate-800 hover:border-slate-700'
                   }`}
@@ -2092,9 +2821,9 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
 
                 {/* Equal Weight */}
                 <div
-                  onClick={() => setBotConfig((prev) => ({ ...prev, sizingModel: 'EQUAL_WEIGHT' }))}
+                  onClick={() => setBookConfig((prev) => ({ ...prev, sizingModel: 'EQUAL_WEIGHT' }))}
                   className={`p-3.5 rounded-xl border transition-all cursor-pointer ${
-                    botConfig.sizingModel === 'EQUAL_WEIGHT'
+                    bookConfig.sizingModel === 'EQUAL_WEIGHT'
                       ? 'bg-purple-950/30 border-purple-500/80'
                       : 'bg-slate-900/60 border-slate-800 hover:border-slate-700'
                   }`}
@@ -2129,16 +2858,16 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                 <div>
                   <div className="flex justify-between items-center mb-1.5">
                     <span className="text-slate-300 font-semibold">{t.maxConcurrentPos}</span>
-                    <strong className="text-sky-400 font-mono">{botConfig.maxConcurrentPositions} Slots</strong>
+                    <strong className="text-sky-400 font-mono">{bookConfig.maxConcurrentPositions} Slots</strong>
                   </div>
                   <div className="grid grid-cols-4 gap-2">
                     {[2, 4, 6, 8].map((slots) => (
                       <button
                         key={slots}
                         type="button"
-                        onClick={() => setBotConfig((prev) => ({ ...prev, maxConcurrentPositions: slots }))}
+                        onClick={() => setBookConfig((prev) => ({ ...prev, maxConcurrentPositions: slots }))}
                         className={`py-1.5 rounded-lg font-mono font-bold transition-colors cursor-pointer border ${
-                          botConfig.maxConcurrentPositions === slots
+                          bookConfig.maxConcurrentPositions === slots
                             ? 'bg-sky-500 text-slate-950 border-sky-400 shadow-sm'
                             : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-white'
                         }`}
@@ -2149,20 +2878,25 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                   </div>
                 </div>
 
-                {/* Risk Per Trade (RPT %) */}
+                {/* Risk Per Trade (RPT %) — P0.6: hard cap PAPER 0.5% ekuitas ditegakkan risk engine */}
                 <div>
                   <div className="flex justify-between items-center mb-1.5">
                     <span className="text-slate-300 font-semibold">{t.riskPerTrade}</span>
-                    <strong className="text-amber-400 font-mono">{botConfig.riskPerTradePercent}%</strong>
+                    <strong className="text-amber-400 font-mono">
+                      {Math.min(bookConfig.riskPerTradePercent, 0.5)}%
+                      {bookConfig.riskPerTradePercent > 0.5 && (
+                        <span className="text-rose-400 text-[10px] ml-1">(cap 0.5%)</span>
+                      )}
+                    </strong>
                   </div>
                   <div className="grid grid-cols-4 gap-2">
-                    {[1.0, 2.0, 3.0, 5.0].map((rpt) => (
+                    {[0.25, 0.5, 0.75, 1.0].map((rpt) => (
                       <button
                         key={rpt}
                         type="button"
-                        onClick={() => setBotConfig((prev) => ({ ...prev, riskPerTradePercent: rpt }))}
+                        onClick={() => setBookConfig((prev) => ({ ...prev, riskPerTradePercent: rpt }))}
                         className={`py-1.5 rounded-lg font-mono font-bold transition-colors cursor-pointer border ${
-                          botConfig.riskPerTradePercent === rpt
+                          bookConfig.riskPerTradePercent === rpt
                             ? 'bg-amber-500 text-slate-950 border-amber-400 shadow-sm'
                             : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-white'
                         }`}
@@ -2171,22 +2905,27 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                       </button>
                     ))}
                   </div>
+                  <p className="text-[10px] text-slate-500 mt-1">
+                    {isEn
+                      ? 'Risk = stop-distance from actual entry, capped at 0.5% equity (PAPER default). Not % of notional.'
+                      : 'Risiko = jarak stop dari entry aktual, cap 0,5% ekuitas (default PAPER). Bukan % notional.'}
+                  </p>
                 </div>
 
                 {/* Min Risk to Reward Filter */}
                 <div>
                   <div className="flex justify-between items-center mb-1.5">
                     <span className="text-slate-300 font-semibold">{t.minRrFilter}</span>
-                    <strong className="text-emerald-400 font-mono">1:{botConfig.minRiskReward}.0</strong>
+                    <strong className="text-emerald-400 font-mono">1:{bookConfig.minRiskReward}.0</strong>
                   </div>
                   <div className="grid grid-cols-4 gap-2">
                     {[1.5, 2.0, 2.5, 3.0].map((rr) => (
                       <button
                         key={rr}
                         type="button"
-                        onClick={() => setBotConfig((prev) => ({ ...prev, minRiskReward: rr }))}
+                        onClick={() => setBookConfig((prev) => ({ ...prev, minRiskReward: rr }))}
                         className={`py-1.5 rounded-lg font-mono font-bold transition-colors cursor-pointer border ${
-                          botConfig.minRiskReward === rr
+                          bookConfig.minRiskReward === rr
                             ? 'bg-emerald-500 text-slate-950 border-emerald-400 shadow-sm'
                             : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-white'
                         }`}
@@ -2201,16 +2940,16 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                 <div>
                   <div className="flex justify-between items-center mb-1.5">
                     <span className="text-slate-300 font-semibold">{t.minAiConfidence}</span>
-                    <strong className="text-purple-400 font-mono">{botConfig.minAiConfidence}%</strong>
+                    <strong className="text-purple-400 font-mono">{bookConfig.minAiConfidence}%</strong>
                   </div>
                   <div className="grid grid-cols-4 gap-2">
                     {[70, 75, 80, 85].map((conf) => (
                       <button
                         key={conf}
                         type="button"
-                        onClick={() => setBotConfig((prev) => ({ ...prev, minAiConfidence: conf }))}
+                        onClick={() => setBookConfig((prev) => ({ ...prev, minAiConfidence: conf }))}
                         className={`py-1.5 rounded-lg font-mono font-bold transition-colors cursor-pointer border ${
-                          botConfig.minAiConfidence === conf
+                          bookConfig.minAiConfidence === conf
                             ? 'bg-purple-600 text-white border-purple-400 shadow-sm'
                             : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-white'
                         }`}
@@ -2224,8 +2963,55 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
             </div>
           </div>
 
+          {/* Section: Autopilot 24/7 — scan otomatis selama bot aktif */}
+          <div className="bg-gradient-to-r from-emerald-950/30 via-slate-900 to-slate-900 border border-emerald-500/40 rounded-2xl p-6 shadow-md space-y-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                  <RefreshCw className={`w-4 h-4 text-emerald-400 ${isBotScanning ? 'animate-spin' : ''}`} />
+                  <span>{isEn ? 'Autopilot 24/7 (Auto-Scan)' : 'Autopilot 24/7 (Scan Otomatis)'}</span>
+                </h3>
+                <span className="text-xs text-slate-400">
+                  {isEn
+                    ? 'While the bot is active, it monitors TP/SL and opens new positions automatically — works for both Pure AI and Hybrid archetypes. Manual mode is unaffected.'
+                    : 'Selama bot aktif, bot memantau TP/SL dan membuka posisi baru secara otomatis — berlaku untuk archetype Pure AI maupun Hybrid. Mode Manual tidak terpengaruh.'}
+                </span>
+              </div>
+              <span className={`text-[11px] font-mono font-bold px-2 py-0.5 rounded border ${
+                bookConfig.isActive && (bookConfig.autoScanIntervalSec || 0) > 0
+                  ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                  : 'bg-slate-800 text-slate-400 border-slate-700'
+              }`}>
+                {bookConfig.isActive && (bookConfig.autoScanIntervalSec || 0) > 0
+                  ? (isEn ? 'RUNNING' : 'BERJALAN')
+                  : (isEn ? 'OFF' : 'MATI')}
+              </span>
+            </div>
+            <div className="grid grid-cols-5 gap-2">
+              {[0, 30, 60, 120, 300].map((sec) => (
+                <button
+                  key={sec}
+                  type="button"
+                  onClick={() => setBookConfig((prev) => ({ ...prev, autoScanIntervalSec: sec }))}
+                  className={`py-1.5 rounded-lg font-mono font-bold text-xs transition-colors cursor-pointer border ${
+                    (bookConfig.autoScanIntervalSec || 0) === sec
+                      ? 'bg-emerald-500 text-slate-950 border-emerald-400 shadow-sm'
+                      : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-white'
+                  }`}
+                >
+                  {sec === 0 ? (isEn ? 'Off' : 'Mati') : sec < 60 ? `${sec}s` : `${sec / 60}m`}
+                </button>
+              ))}
+            </div>
+            <p className="text-[11px] text-slate-500">
+              {bookLastScanAt
+                ? (isEn ? `Last scan: ${bookLastScanAt.toLocaleTimeString(isEn ? 'en-US' : 'id-ID')}` : `Scan terakhir: ${bookLastScanAt.toLocaleTimeString('id-ID')}`)
+                : (isEn ? 'No automatic scan executed yet in this session.' : 'Belum ada scan otomatis di sesi ini.')}
+            </p>
+          </div>
+
           {/* Section 4: Hybrid Custom Calibration Controls */}
-          {botConfig.archetype === 'HYBRID' && (
+          {bookConfig.archetype === 'HYBRID' && (
             <div className="bg-gradient-to-r from-purple-950/40 via-slate-900 to-slate-900 border border-purple-500/50 rounded-2xl p-6 shadow-md space-y-4 animate-in fade-in duration-200">
               <div className="border-b border-purple-800/60 pb-3 flex items-center justify-between">
                 <div>
@@ -2247,15 +3033,15 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                 <div className="space-y-2">
                   <div className="flex justify-between items-center">
                     <span className="text-slate-300 font-semibold">{isEn ? 'Risk Multiplier' : 'Multiplier Risiko'}:</span>
-                    <strong className="text-purple-400 font-mono text-sm">{botConfig.hybridRiskMultiplier || 1.25}x</strong>
+                    <strong className="text-purple-400 font-mono text-sm">{bookConfig.hybridRiskMultiplier || 1.25}x</strong>
                   </div>
                   <input
                     type="range"
                     min="0.5"
                     max="2.0"
                     step="0.25"
-                    value={botConfig.hybridRiskMultiplier || 1.25}
-                    onChange={(e) => setBotConfig((prev) => ({ ...prev, hybridRiskMultiplier: parseFloat(e.target.value) }))}
+                    value={bookConfig.hybridRiskMultiplier || 1.25}
+                    onChange={(e) => setBookConfig((prev) => ({ ...prev, hybridRiskMultiplier: parseFloat(e.target.value) }))}
                     className="w-full accent-purple-500 cursor-pointer"
                   />
                   <div className="flex justify-between text-[10px] text-slate-400 font-mono">
@@ -2269,15 +3055,15 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                 <div className="space-y-2">
                   <div className="flex justify-between items-center">
                     <span className="text-slate-300 font-semibold">{isEn ? 'Trailing Stop Buffer' : 'Buffer Trailing Stop'}:</span>
-                    <strong className="text-emerald-400 font-mono text-sm">{botConfig.trailingStopPercent || 2.5}%</strong>
+                    <strong className="text-emerald-400 font-mono text-sm">{bookConfig.trailingStopPercent || 2.5}%</strong>
                   </div>
                   <input
                     type="range"
                     min="1.0"
                     max="5.0"
                     step="0.5"
-                    value={botConfig.trailingStopPercent || 2.5}
-                    onChange={(e) => setBotConfig((prev) => ({ ...prev, trailingStopPercent: parseFloat(e.target.value) }))}
+                    value={bookConfig.trailingStopPercent || 2.5}
+                    onChange={(e) => setBookConfig((prev) => ({ ...prev, trailingStopPercent: parseFloat(e.target.value) }))}
                     className="w-full accent-emerald-500 cursor-pointer"
                   />
                   <div className="flex justify-between text-[10px] text-slate-400 font-mono">
@@ -2292,8 +3078,8 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                   <label className="flex items-center gap-2 cursor-pointer">
                     <input
                       type="checkbox"
-                      checked={botConfig.hybridRequireConfirmation || false}
-                      onChange={(e) => setBotConfig((prev) => ({ ...prev, hybridRequireConfirmation: e.target.checked }))}
+                      checked={bookConfig.hybridRequireConfirmation || false}
+                      onChange={(e) => setBookConfig((prev) => ({ ...prev, hybridRequireConfirmation: e.target.checked }))}
                       className="w-4 h-4 rounded text-purple-500 accent-purple-500 cursor-pointer"
                     />
                     <span className="font-semibold text-white text-xs">
@@ -2322,7 +3108,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
             <div className="flex items-center gap-3 w-full sm:w-auto">
               <button
                 type="button"
-                onClick={handleRunBotAutoScan}
+                onClick={() => scanCurrentBook(false)}
                 disabled={isBotScanning}
                 className="px-4 py-2.5 rounded-xl text-xs font-bold bg-sky-500 hover:bg-sky-400 text-slate-950 transition-colors flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 w-full sm:w-auto"
               >
@@ -2332,7 +3118,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
 
               <button
                 type="button"
-                onClick={() => handleSaveBotSettings(botConfig)}
+                onClick={() => handleSaveBotSettings(bookConfig)}
                 className="px-5 py-2.5 rounded-xl text-xs font-bold bg-emerald-500 hover:bg-emerald-400 text-slate-950 transition-colors shadow-sm flex items-center justify-center gap-1.5 cursor-pointer w-full sm:w-auto"
               >
                 <Check className="w-4 h-4" />
@@ -2478,7 +3264,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
               </div>
 
               <div className="mt-4 pt-3 border-t border-slate-800/80 text-[11px] text-slate-400">
-                {isEn ? 'Kelly sizing math, strict quantitative thresholds, zero emotional deviation.' : 'Formula matematika Kelly, batas kuantitatif disiplin, tanpa deviasi emosi.'}
+                {isEn ? 'Fixed-fractional sizing from actual stop distance (Kelly-form with assumed, uncalibrated p), deterministic quantitative gates.' : 'Sizing fixed-fractional dari jarak stop aktual (bentuk Kelly dengan p asumsi, tidak terkalibrasi), gate kuantitatif deterministik.'}
               </div>
             </div>
 
@@ -2496,38 +3282,63 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                 </div>
 
                 <div className="space-y-3 text-xs mt-4">
-                  <div className="flex justify-between p-3 rounded-lg bg-slate-900 border border-slate-800">
-                    <span className="text-slate-400">{t.totalNetWorth}:</span>
-                    <strong className="text-white text-sm font-mono tabular-nums">
-                      ${Math.round(botConfig.liquidityBalance + botPositionsValue * (botConfig.hybridRiskMultiplier || 1.25)).toLocaleString()}
-                    </strong>
-                  </div>
+                  {hybridHasTrackRecord ? (
+                    <>
+                      <div className="flex justify-between p-3 rounded-lg bg-slate-900 border border-slate-800">
+                        <span className="text-slate-400">{t.totalNetWorth}:</span>
+                        <strong className="text-white text-sm font-mono tabular-nums">${hybridTotalEquity.toLocaleString()}</strong>
+                      </div>
 
-                  <div className="flex justify-between p-3 rounded-lg bg-slate-900 border border-slate-800">
-                    <span className="text-slate-400">{t.pnlTitle}:</span>
-                    <strong className="text-purple-400 text-sm font-mono tabular-nums">
-                      +${Math.round((botTotalPnLOverall > 0 ? botTotalPnLOverall : 1250) * (botConfig.hybridRiskMultiplier || 1.25)).toLocaleString()}
-                    </strong>
-                  </div>
+                      <div className="flex justify-between p-3 rounded-lg bg-slate-900 border border-slate-800">
+                        <span className="text-slate-400">{t.pnlTitle} Hybrid:</span>
+                        <strong className={`text-sm font-mono tabular-nums ${hybridTotalPnL >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                          {hybridTotalPnL >= 0 ? '+' : ''}${hybridTotalPnL.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </strong>
+                      </div>
 
-                  <div className="flex justify-between p-3 rounded-lg bg-slate-900 border border-slate-800">
-                    <span className="text-slate-400">{t.winrateTitle}:</span>
-                    <strong className="text-purple-400 text-sm font-mono tabular-nums">
-                      {Math.min(95, Math.round((botWinRate || 75) * 1.05))}% (Calibrated)
-                    </strong>
-                  </div>
+                      <div className="flex justify-between p-3 rounded-lg bg-slate-900 border border-slate-800">
+                        <span className="text-slate-400">{isEn ? 'Realized / Unrealized:' : 'Realisasi / Belum Realisasi:'}</span>
+                        <strong className="text-slate-200 font-mono text-sm">
+                          {hybridRealizedPnL >= 0 ? '+' : ''}${hybridRealizedPnL.toLocaleString()} / {hybridUnrealizedPnL >= 0 ? '+' : ''}${hybridUnrealizedPnL.toLocaleString()}
+                        </strong>
+                      </div>
 
-                  <div className="flex justify-between p-3 rounded-lg bg-slate-900 border border-slate-800">
-                    <span className="text-slate-400">{isEn ? 'User Multiplier' : 'Multiplier Risiko'}:</span>
-                    <strong className="text-purple-300 font-mono">{botConfig.hybridRiskMultiplier || 1.25}x Base Kelly</strong>
-                  </div>
+                      <div className="flex justify-between p-3 rounded-lg bg-slate-900 border border-slate-800">
+                        <span className="text-slate-400">{t.winrateTitle} Hybrid:</span>
+                        <strong className="text-purple-400 text-sm font-mono tabular-nums">
+                          {hybridWinRate}% ({hybridWinningTrades}/{hybridClosedTrades.length} {isEn ? 'closed' : 'selesai'})
+                        </strong>
+                      </div>
 
-                  <div className="flex justify-between p-3 rounded-lg bg-slate-900 border border-slate-800">
-                    <span className="text-slate-400">{t.executionStyle}:</span>
-                    <span className="text-purple-300 font-medium">
-                      {isEn ? 'AI Alpha Signals + User Overrides' : 'Sinyal AI Radar + Override Pengguna'}
-                    </span>
-                  </div>
+                      <div className="flex justify-between p-3 rounded-lg bg-slate-900 border border-slate-800">
+                        <span className="text-slate-400">{t.positionsValue}:</span>
+                        <strong className="text-slate-200 font-mono">{hybridOpenPositions.length} {isEn ? 'open hybrid positions' : 'posisi hybrid terbuka'}</strong>
+                      </div>
+
+                      <div className="flex justify-between p-3 rounded-lg bg-slate-900 border border-slate-800">
+                        <span className="text-slate-400">{isEn ? 'User Multiplier' : 'Multiplier Risiko'}:</span>
+                        <strong className="text-purple-300 font-mono">{hybridConfig.hybridRiskMultiplier || 1.25}x Base Kelly</strong>
+                      </div>
+
+                      <div className="flex justify-between p-3 rounded-lg bg-slate-900 border border-slate-800">
+                        <span className="text-slate-400">{t.executionStyle}:</span>
+                        <span className="text-purple-300 font-medium">
+                          {isEn ? 'AI Alpha Signals + User Overrides' : 'Sinyal AI Radar + Override Pengguna'}
+                        </span>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="p-4 rounded-lg bg-slate-900/60 border border-dashed border-purple-800/50 text-center">
+                      <p className="text-slate-300 text-xs leading-relaxed">
+                        {isEn
+                          ? 'The Hybrid book is empty. Open the Hybrid AI Bot mode and run a scan — it trades its own capital with your risk multiplier, and results appear here.'
+                          : 'Buku Hybrid masih kosong. Buka mode Bot Hybrid AI dan jalankan scan — dia trading dengan modal sendiri dan multiplier risikomu; hasilnya tampil di sini.'}
+                      </p>
+                      <p className="text-purple-300 text-[11px] font-mono mt-2 uppercase tracking-wider">
+                        {isEn ? 'No fabricated numbers' : 'Tanpa angka karangan'}
+                      </p>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -2607,7 +3418,24 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                 >
                   {t.resetScopeBot || (isEn ? 'AI Bot Only' : 'AI Bot Saja')}
                 </button>
+                <button
+                  type="button"
+                  onClick={() => setResetScope('hybrid')}
+                  className={`py-2 px-2 rounded-xl font-bold transition-all border cursor-pointer ${
+                    resetScope === 'hybrid'
+                      ? 'bg-purple-600 text-white border-purple-400 shadow-sm'
+                      : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-white'
+                  }`}
+                >
+                  {isEn ? 'Hybrid Only' : 'Hybrid Saja'}
+                </button>
               </div>
+              <p className="text-[11px] text-slate-500 flex items-center gap-1.5">
+                <History className="w-3 h-3 text-slate-500" />
+                {isEn
+                  ? 'Before wiping, the running session is archived to Session History for later analysis.'
+                  : 'Sebelum dihapus, sesi yang berjalan diarsipkan ke Riwayat Sesi untuk analisis lebih lanjut.'}
+              </p>
             </div>
 
             {/* Initial Starting Cash Input */}
@@ -2685,6 +3513,194 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                 <span>{t.confirmResetBtn || (isEn ? 'Confirm Reset & Restart' : 'Konfirmasi Reset & Mulai Ulang')}</span>
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================================
+          MODAL: RIWAYAT SESI (ARSIP HASIL RESET UNTUK ANALISIS)
+         ========================================================================= */}
+      {showSessionArchive && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-4 backdrop-blur-md animate-in fade-in duration-200">
+          <div className="bg-[#0b1322] border border-sky-500/40 rounded-2xl max-w-3xl w-full max-h-[85vh] overflow-y-auto p-6 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-sky-500/15 border border-sky-500/30 flex items-center justify-center text-sky-400">
+                  <History className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white">
+                    {isEn ? 'Session History (Archived on Reset)' : 'Riwayat Sesi (Diarsipkan saat Reset)'}
+                  </h3>
+                  <span className="text-xs text-slate-400">
+                    {isEn
+                      ? 'Every reset archives the finished session here — compare books, review closed trades, analyze what worked.'
+                      : 'Setiap reset mengarsipkan sesi yang selesai ke sini — bandingkan buku, tinjau trade tertutup, analisis apa yang berhasil.'}
+                  </span>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowSessionArchive(false)}
+                className="text-slate-400 hover:text-white text-xl leading-none cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            {sessionArchive.length === 0 ? (
+              <div className="text-center py-10 text-slate-400 text-sm">
+                {isEn
+                  ? 'No archived sessions yet. They are created automatically every time you run a reset.'
+                  : 'Belum ada sesi terarsip. Arsip dibuat otomatis setiap kali kamu menjalankan reset.'}
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {/* Grafik pertumbuhan ekuitas lintas sesi (tertua → terbaru) */}
+                {(() => {
+                  const chrono = [...sessionArchive].reverse();
+                  const W = 640, H = 170, PAD_L = 8, PAD_R = 56, PAD_Y = 14;
+                  const series = [
+                    { key: 'manual' as const, color: '#fbbf24', label: isEn ? 'Manual' : 'Manual' },
+                    { key: 'bot' as const, color: '#38bdf8', label: isEn ? 'Pure AI' : 'Pure AI' },
+                    { key: 'hybrid' as const, color: '#c084fc', label: isEn ? 'Hybrid' : 'Hybrid' },
+                  ];
+                  const equities = chrono.flatMap((s) => [s.manual.finalEquity, s.bot.finalEquity, s.hybrid.finalEquity]);
+                  const minV = Math.min(...equities, 0);
+                  const maxV = Math.max(...equities, 1);
+                  const span = maxV - minV || 1;
+                  const xAt = (i: number) => PAD_L + (chrono.length === 1 ? (W - PAD_L - PAD_R) / 2 : (i * (W - PAD_L - PAD_R)) / (chrono.length - 1));
+                  const yAt = (v: number) => PAD_Y + (1 - (v - minV) / span) * (H - 2 * PAD_Y);
+                  return (
+                    <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
+                      <div className="flex items-center justify-between mb-1.5">
+                        <span className="text-[11px] text-slate-300 font-bold uppercase tracking-wider">
+                          {isEn ? 'Equity Growth Across Sessions' : 'Pertumbuhan Ekuitas Lintas Sesi'}
+                        </span>
+                        <div className="flex items-center gap-3 text-[10px] font-mono">
+                          {series.map((s) => (
+                            <span key={s.key} className="flex items-center gap-1" style={{ color: s.color }}>
+                              <span className="inline-block w-2 h-2 rounded-full" style={{ background: s.color }} />
+                              {s.label}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                      <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-[150px]" preserveAspectRatio="none">
+                        <line x1={PAD_L} y1={yAt(0)} x2={W - PAD_R} y2={yAt(0)} stroke="#334155" strokeDasharray="4 4" strokeWidth="1" />
+                        <text x={W - PAD_R + 4} y={yAt(0) + 3} fill="#64748b" fontSize="9">$0</text>
+                        {series.map((s) => {
+                          const pts = chrono.map((sess, i) => `${xAt(i)},${yAt(sess[s.key].finalEquity)}`).join(' ');
+                          const last = chrono[chrono.length - 1];
+                          return (
+                            <g key={s.key}>
+                              <polyline points={pts} fill="none" stroke={s.color} strokeWidth="2" strokeLinejoin="round" />
+                              {chrono.map((sess, i) => (
+                                <circle key={i} cx={xAt(i)} cy={yAt(sess[s.key].finalEquity)} r="3" fill={s.color}>
+                                  <title>{`${s.label} · ${new Date(sess.endedAt).toLocaleString(isEn ? 'en-US' : 'id-ID')} · $${sess[s.key].finalEquity.toLocaleString()}`}</title>
+                                </circle>
+                              ))}
+                              <text x={xAt(chrono.length - 1) + 6} y={yAt(last[s.key].finalEquity) + 3} fill={s.color} fontSize="9">
+                                ${Math.round(last[s.key].finalEquity).toLocaleString()}
+                              </text>
+                            </g>
+                          );
+                        })}
+                        {chrono.map((sess, i) => (
+                          <text key={i} x={xAt(i)} y={H - 2} fill="#64748b" fontSize="8" textAnchor="middle">
+                            #{i + 1}
+                          </text>
+                        ))}
+                      </svg>
+                      <p className="text-[10px] text-slate-500 mt-1">
+                        {isEn
+                          ? `Equity at archive time per book, oldest (#1) to newest (#${chrono.length}). Hover dots for exact values.`
+                          : `Ekuitas saat arsip per buku, tertua (#1) ke terbaru (#${chrono.length}). Arahkan kursor ke titik untuk nilai persis.`}
+                      </p>
+                    </div>
+                  );
+                })()}
+
+                {sessionArchive.map((session) => {
+                  const expanded = expandedSessionId === session.id;
+                  const books: Array<{ key: string; label: string; color: string; snap: SessionBookSnapshot }> = [
+                    { key: 'manual', label: isEn ? 'Manual' : 'Manual', color: 'text-amber-300', snap: session.manual },
+                    { key: 'bot', label: isEn ? 'Pure AI Bot' : 'Bot Pure AI', color: 'text-sky-300', snap: session.bot },
+                    { key: 'hybrid', label: isEn ? 'Hybrid Bot' : 'Bot Hybrid', color: 'text-purple-300', snap: session.hybrid },
+                  ];
+                  return (
+                    <div key={session.id} className="rounded-xl border border-slate-800 bg-slate-900/60 overflow-hidden">
+                      <button
+                        type="button"
+                        onClick={() => setExpandedSessionId(expanded ? null : session.id)}
+                        className="w-full flex items-center justify-between p-3.5 hover:bg-slate-900 transition-colors cursor-pointer text-left"
+                      >
+                        <div>
+                          <span className="text-xs font-bold text-white font-mono">
+                            {new Date(session.endedAt).toLocaleString(isEn ? 'en-US' : 'id-ID')}
+                          </span>
+                          <span className="text-[10px] text-slate-500 uppercase tracking-wider ml-2">
+                            {isEn ? 'scope' : 'cakupan'}: {session.scope}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-4 text-[11px] font-mono">
+                          <span className="text-amber-300">M: {session.manual.finalEquity >= 0 ? '+' : ''}{session.manual.finalEquity.toLocaleString()}</span>
+                          <span className="text-sky-300">AI: {session.bot.finalEquity >= 0 ? '+' : ''}{session.bot.finalEquity.toLocaleString()}</span>
+                          <span className="text-purple-300">H: {session.hybrid.finalEquity >= 0 ? '+' : ''}{session.hybrid.finalEquity.toLocaleString()}</span>
+                          <span className="text-slate-500">{expanded ? '▲' : '▼'}</span>
+                        </div>
+                      </button>
+
+                      {expanded && (
+                        <div className="p-3.5 pt-0 space-y-3">
+                          <div className="grid grid-cols-3 gap-2">
+                            {books.map((b) => (
+                              <div key={b.key} className="p-3 rounded-lg bg-slate-950/60 border border-slate-800 space-y-1">
+                                <span className={`text-[10px] font-bold uppercase tracking-wider ${b.color}`}>{b.label}</span>
+                                <div className="text-[11px] text-slate-300 font-mono">
+                                  {isEn ? 'Equity' : 'Ekuitas'}: <strong>${b.snap.finalEquity.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
+                                </div>
+                                <div className={`text-[11px] font-mono ${b.snap.realizedPnL + b.snap.openPnL >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                  P&L: {b.snap.realizedPnL + b.snap.openPnL >= 0 ? '+' : ''}${(b.snap.realizedPnL + b.snap.openPnL).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                  <span className="text-slate-500"> ({isEn ? 'real' : 'real'} {b.snap.realizedPnL >= 0 ? '+' : ''}{b.snap.realizedPnL.toLocaleString()} / {isEn ? 'open' : 'open'} {b.snap.openPnL >= 0 ? '+' : ''}{b.snap.openPnL.toLocaleString()})</span>
+                                </div>
+                                <div className="text-[11px] text-slate-400 font-mono">
+                                  {isEn ? 'Winrate' : 'Winrate'}: {b.snap.winrate}% ({b.snap.wins}/{b.snap.closedTrades.length})
+                                </div>
+                                <div className="text-[11px] text-slate-400 font-mono">
+                                  {isEn ? 'Open at archive' : 'Posisi saat arsip'}: {b.snap.openPositions}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+
+                          {(['manual', 'bot', 'hybrid'] as const).map((bk) =>
+                            session[bk].closedTrades.length > 0 ? (
+                              <div key={bk}>
+                                <span className="text-[10px] text-slate-400 uppercase tracking-wider font-mono block mb-1.5">
+                                  {bk === 'manual' ? (isEn ? 'Manual closed trades' : 'Trade tertutup Manual') : bk === 'bot' ? (isEn ? 'Pure AI closed trades' : 'Trade tertutup Pure AI') : (isEn ? 'Hybrid closed trades' : 'Trade tertutup Hybrid')} ({session[bk].closedTrades.length})
+                                </span>
+                                <div className="space-y-1 max-h-40 overflow-y-auto pr-1">
+                                  {session[bk].closedTrades.map((c) => (
+                                    <div key={c.id} className="flex items-center justify-between px-3 py-1.5 rounded bg-slate-950/60 border border-slate-800/70 text-[11px] font-mono">
+                                      <span className="text-slate-200 font-bold">{c.symbol}</span>
+                                      <span className="text-slate-500">{c.closeReason === 'TAKE_PROFIT' ? 'TP' : c.closeReason === 'STOP_LOSS' ? 'SL' : 'EXIT'} @ {c.closePrice.toLocaleString()}</span>
+                                      <span className="text-slate-500">{(c.dateClosed || '').slice(0, 10)}</span>
+                                      <strong className={c.realizedPnL >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
+                                        {c.realizedPnL >= 0 ? '+' : ''}${c.realizedPnL.toLocaleString()} ({c.realizedPnLPercent >= 0 ? '+' : ''}{c.realizedPnLPercent.toFixed(1)}%)
+                                      </strong>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            ) : null
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -2791,7 +3807,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                 <div className="flex items-center gap-1.5 pt-1 overflow-x-auto scrollbar-none">
                   {[
                     { label: '10%', val: 10 },
-                    { label: '15% (Kelly AI)', val: 15 },
+                    { label: '15%', val: 15 },
                     { label: '25%', val: 25 },
                     { label: '50%', val: 50 },
                     { label: '75%', val: 75 },
@@ -3212,7 +4228,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                   <strong className="text-emerald-400 text-sm block mt-0.5">
                     {botConfig.riskPerTradePercent}% Risk / Trade
                   </strong>
-                  <span className="text-[10px] text-slate-500">{isEn ? 'Kelly Sizing Formula' : 'Formula Kelly Sizing'}</span>
+                  <span className="text-[10px] text-slate-500">{isEn ? 'Sizing: fixed fractional from stop distance' : 'Sizing: fixed fractional dari jarak stop'}</span>
                 </div>
               </div>
 

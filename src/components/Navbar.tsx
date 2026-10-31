@@ -18,6 +18,7 @@ interface NavbarProps {
   lastUpdated: Date | null;
   isRefreshing: boolean;
   onManualRefresh: () => void;
+  binanceConnected?: boolean | null;
   lang?: Language;
   onToggleLanguage?: () => void;
 }
@@ -37,6 +38,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   lastUpdated,
   isRefreshing,
   onManualRefresh,
+  binanceConnected = null,
   lang = 'ID',
   onToggleLanguage,
 }) => {
@@ -110,15 +112,31 @@ export const Navbar: React.FC<NavbarProps> = ({
 
         {/* Zone 3: Live Status & Controls */}
         <div className="flex items-center gap-2.5 shrink-0">
-          {/* 24/7 Binance Live Status Badge */}
-          <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 bg-amber-500/10 border border-amber-500/30 rounded-lg shadow-sm">
+          {/* 24/7 Binance Live Status Badge — mencerminkan status koneksi nyata */}
+          <div className={`hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg shadow-sm border ${
+            binanceConnected === false
+              ? 'bg-rose-500/10 border-rose-500/30'
+              : 'bg-amber-500/10 border-amber-500/30'
+          }`}>
             <span className="relative flex h-2 w-2">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75" />
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-500" />
+              <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
+                binanceConnected === false ? 'bg-rose-400' : 'bg-amber-400'
+              }`} />
+              <span className={`relative inline-flex rounded-full h-2 w-2 ${
+                binanceConnected === false ? 'bg-rose-500' : 'bg-amber-500'
+              }`} />
             </span>
-            <span className="text-xs font-mono font-bold text-amber-300 tracking-tight">
-              BINANCE 24/7 LIVE
+            <span className={`text-xs font-mono font-bold tracking-tight ${
+              binanceConnected === false ? 'text-rose-300' : 'text-amber-300'
+            }`}>
+              {binanceConnected === false ? 'DATA STALE — TIDAK TERSINKRON' : 'BINANCE 24/7 LIVE'}
             </span>
+          </div>
+
+          {/* P0.7/P2.3 — badge mode eksplisit: seluruh trading adalah PAPER.
+              Tidak ada endpoint order live; badge kontras tinggi, bukan dot halus. */}
+          <div className="hidden sm:flex items-center px-2.5 py-1.5 bg-white border border-white rounded-lg shadow-sm">
+            <span className="text-xs font-mono font-black tracking-widest text-slate-950">PAPER</span>
           </div>
 
           {/* Live Sync Frequency & Refresh Controller */}

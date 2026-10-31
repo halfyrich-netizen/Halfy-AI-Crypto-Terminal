@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { MarketType, Stock, MarketIndex, PredictiveAlert, PortfolioPosition, ClosedTradePosition } from './types/stock';
+import { MarketType, Stock, MarketIndex, PredictiveAlert, PortfolioPosition, ClosedTradePosition, MarketRegime } from './types/stock';
 import { fetchMarketSummary, fetchStocks, fetchLiveAlerts } from './services/api';
 import { playSignalChime } from './utils/audio';
 import { Navbar } from './components/Navbar';
@@ -107,7 +107,24 @@ const INITIAL_PORTFOLIO: PortfolioPosition[] = [
 
 export default function App() {
   const [currentMarket, setCurrentMarket] = useState<MarketType>('CRYPTO');
-  const [activeTab, setActiveTab] = useState<string>('dashboard');
+  // R-7 — persist tab aktif per sesi browser (sessionStorage, bukan lintas-tab)
+  const [activeTab, setActiveTab] = useState<string>(() => {
+    try {
+      const saved = sessionStorage.getItem('halfy_active_tab');
+      if (saved) return saved;
+    } catch {
+      // ignore
+    }
+    return 'dashboard';
+  });
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem('halfy_active_tab', activeTab);
+    } catch {
+      // ignore
+    }
+  }, [activeTab]);
   const [stocks, setStocks] = useState<Stock[]>([]);
   const [indices, setIndices] = useState<MarketIndex[]>([]);
   const [alerts, setAlerts] = useState<PredictiveAlert[]>([]);
@@ -117,6 +134,11 @@ export default function App() {
   const [loading, setLoading] = useState<boolean>(true);
   const [refreshInterval, setRefreshInterval] = useState<number>(5); // default 5s
   const [lastUpdated, setLastUpdated] = useState<Date | null>(new Date());
+  // Status koneksi nyata ke data source (dari /api/market/summary — bukan asumsi UI)
+  const [binanceConnected, setBinanceConnected] = useState<boolean | null>(null);
+  const [binanceLastSync, setBinanceLastSync] = useState<number | null>(null);
+  // P1.2 — regime pasar dari server (gate eligibility strategi)
+  const [marketRegime, setMarketRegime] = useState<MarketRegime | null>(null);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
 
   // Bilingual (Indonesian & English) state with LocalStorage persistence
@@ -179,9 +201,14 @@ export default function App() {
     return 26652.50; // Starting available liquidity matching initial portfolio ($50k equity baseline)
   });
 
+  // Persistensi manual portfolio — skip write bila isi tidak berubah: mencegah
+  // tab lain menimpa localStorage dengan state basi (multi-tab clobber).
   useEffect(() => {
     try {
-      localStorage.setItem('halfy_portfolio_crypto_v6', JSON.stringify(portfolio));
+      const next = JSON.stringify(portfolio);
+      if (localStorage.getItem('halfy_portfolio_crypto_v6') !== next) {
+        localStorage.setItem('halfy_portfolio_crypto_v6', next);
+      }
     } catch {
       // ignore
     }
@@ -189,7 +216,10 @@ export default function App() {
 
   useEffect(() => {
     try {
-      localStorage.setItem('halfy_closed_trades_crypto_v1', JSON.stringify(closedTrades));
+      const next = JSON.stringify(closedTrades);
+      if (localStorage.getItem('halfy_closed_trades_crypto_v1') !== next) {
+        localStorage.setItem('halfy_closed_trades_crypto_v1', next);
+      }
     } catch {
       // ignore
     }
@@ -197,11 +227,38 @@ export default function App() {
 
   useEffect(() => {
     try {
-      localStorage.setItem('halfy_liquidity_crypto_v1', liquidityBalance.toString());
+      const next = liquidityBalance.toString();
+      if (localStorage.getItem('halfy_liquidity_crypto_v1') !== next) {
+        localStorage.setItem('halfy_liquidity_crypto_v1', next);
+      }
     } catch {
       // ignore
     }
   }, [liquidityBalance]);
+
+  // Sinkronisasi lintas-tab: bila tab lain mengubah buku, adopsi perubahannya
+  // alih-alih saling menimpa dengan state basi.
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (!e.newValue) return;
+      try {
+        if (e.key === 'halfy_portfolio_crypto_v6') {
+          const next = JSON.parse(e.newValue);
+          setPortfolio((prev) => (JSON.stringify(prev) === e.newValue ? prev : next));
+        } else if (e.key === 'halfy_closed_trades_crypto_v1') {
+          const next = JSON.parse(e.newValue);
+          setClosedTrades((prev) => (JSON.stringify(prev) === e.newValue ? prev : next));
+        } else if (e.key === 'halfy_liquidity_crypto_v1') {
+          const next = parseFloat(e.newValue);
+          setLiquidityBalance((prev) => (prev === next ? prev : (Number.isFinite(next) ? next : prev)));
+        }
+      } catch {
+        // ignore malformed
+      }
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
 
   // Check Web Push Notification status on mount
   useEffect(() => {
@@ -224,10 +281,16 @@ export default function App() {
       setStocks(allStocks);
       setAlerts(liveAlerts);
       setLastUpdated(new Date());
+      setBinanceConnected(summary.binance ? summary.binance.connected : null);
+      setBinanceLastSync(summary.binance ? summary.binance.lastSync : null);
+      setMarketRegime((summary as { regime?: MarketRegime }).regime ?? null);
 
-      // Auto-sync portfolio positions with live calibrated stock/crypto prices
-      setPortfolio((prevPortfolio) =>
-        prevPortfolio.map((pos) => {
+      // Auto-sync portfolio positions with live calibrated stock/crypto prices.
+      // Return prev bila tidak ada harga yang berubah — mencegah churn identitas
+      // state yang memicu persistensi ulang tiap polling (multi-tab clobber).
+      setPortfolio((prevPortfolio) => {
+        let changed = false;
+        const next = prevPortfolio.map((pos) => {
           const liveStock = allStocks.find((s) => s.symbol === pos.symbol);
           if (!liveStock) return pos;
           const currentPrice = liveStock.currentPrice;
@@ -236,6 +299,15 @@ export default function App() {
           const unrealizedPnLPercent = pos.totalCost > 0
             ? Math.round((unrealizedPnL / pos.totalCost) * 10000) / 100
             : 0;
+          if (
+            pos.currentPrice === currentPrice &&
+            pos.currentValue === currentValue &&
+            pos.unrealizedPnL === unrealizedPnL &&
+            pos.unrealizedPnLPercent === unrealizedPnLPercent
+          ) {
+            return pos;
+          }
+          changed = true;
           return {
             ...pos,
             currentPrice,
@@ -243,8 +315,9 @@ export default function App() {
             unrealizedPnL,
             unrealizedPnLPercent,
           };
-        })
-      );
+        });
+        return changed ? next : prevPortfolio;
+      });
 
       if (loading) {
         const defaultStock = allStocks.find((s) => s.market === (currentMarket === 'US' ? 'US' : 'CRYPTO'));
@@ -424,6 +497,7 @@ export default function App() {
         lastUpdated={lastUpdated}
         isRefreshing={isRefreshing}
         onManualRefresh={handleManualRefresh}
+        binanceConnected={binanceConnected}
         lang={lang}
         onToggleLanguage={handleToggleLanguage}
       />
@@ -470,6 +544,8 @@ export default function App() {
                 lastUpdated={lastUpdated}
                 isRefreshing={isRefreshing}
                 onManualRefresh={() => loadMarketData(false)}
+                binanceConnected={binanceConnected}
+                binanceLastSync={binanceLastSync}
                 lang={lang}
               />
             )}
@@ -517,6 +593,8 @@ export default function App() {
                 openAddModalSignal={openAddModalSignal}
                 onClearPendingAddStock={() => setPendingAddStock(null)}
                 onResetSimulation={handleResetSimulation}
+                binanceLastSync={binanceLastSync}
+                marketRegime={marketRegime}
                 lang={lang}
               />
             )}
